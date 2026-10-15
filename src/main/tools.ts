@@ -81,6 +81,9 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
     const lines = raw.split(/\r?\n/)
     const offset = Math.max(1, Math.floor(numberArg(args, 'offset', 1)))
     const limit = Math.min(800, Math.max(1, Math.floor(numberArg(args, 'limit', 400))))
+    if (offset > lines.length) {
+      return `read_file ${textArg(args, 'path')}: в файле ${lines.length} строк, смещение ${offset} за концом. Повтори чтение с offset 1.`
+    }
     const slice = lines.slice(offset - 1, offset - 1 + limit)
     return clip(`read_file ${textArg(args, 'path')} строки ${offset}-${offset + slice.length - 1} из ${lines.length}\n${slice.join('\n')}`)
   }
@@ -90,7 +93,7 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
     if (query.length < 2) throw new Error('Запрос поиска короче 2 символов.')
     const hits: string[] = []
     let seen = 0
-    const walk = async (dir: string): Promise<void> => {
+    const walk = async (dir: string, needle: string): Promise<void> => {
       if (hits.length >= 40 || seen > 4000) return
       let entries
       try {
@@ -98,10 +101,11 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
       } catch {
         return
       }
+      const expected = needle.toLowerCase()
       for (const entry of entries) {
         if (hits.length >= 40) return
         if (entry.isDirectory()) {
-          if (!SKIP_DIRS.has(entry.name)) await walk(path.join(dir, entry.name))
+          if (!SKIP_DIRS.has(entry.name)) await walk(path.join(dir, entry.name), needle)
           continue
         }
         if (++seen > 4000) return
@@ -114,7 +118,7 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
           const raw = await readFile(full, 'utf8')
           const lines = raw.split(/\r?\n/)
           for (let index = 0; index < lines.length; index += 1) {
-            if (!lines[index]?.toLowerCase().includes(query.toLowerCase())) continue
+            if (!lines[index]?.toLowerCase().includes(expected)) continue
             const relative = path.relative(projectPath, full).split(path.sep).join('/')
             hits.push(`${relative}:${index + 1}: ${lines[index]?.trim().slice(0, 240)}`)
             if (hits.length >= 40) return
@@ -124,7 +128,15 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
         }
       }
     }
-    await walk(projectPath)
+    await walk(projectPath, query)
+    if (!hits.length && /\s/.test(query)) {
+      const word = query.split(/\s+/).filter((item) => item.length >= 3).sort((a, b) => b.length - a.length)[0]
+      if (word && word.toLowerCase() !== query.toLowerCase()) {
+        seen = 0
+        await walk(projectPath, word)
+        if (hits.length) hits.unshift(`Запрос «${query}» пуст, показаны совпадения «${word}».`)
+      }
+    }
     return `search_in_project ${query}\n${hits.join('\n') || 'Ничего не найдено.'}`
   }
 

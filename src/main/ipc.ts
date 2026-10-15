@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { dialog, type BrowserWindow } from 'electron'
 import { modelProblem } from '../shared/settings'
 import type { AgentEvent, Result, RunnerEvent } from '../shared/types'
@@ -58,15 +59,19 @@ export async function registerIpc(getWindow: () => BrowserWindow | null): Promis
     if (!chat) throw new Error('Чат не найден.')
     return chat
   }))
-  ipcMain.handle('chats:open', () => guard(async () => {
+  ipcMain.handle('chats:open', (_event, requested?: string) => guard(async () => {
     const problem = modelProblem(getSettings())
     if (problem) throw new Error(problem)
-    const result = await dialog.showOpenDialog({
-      title: 'Папка проекта',
-      properties: ['openDirectory']
-    })
-    if (result.canceled || !result.filePaths[0]) return null
-    const folder = result.filePaths[0]
+    let folder = typeof requested === 'string' ? requested.trim() : ''
+    if (!folder) {
+      const result = await dialog.showOpenDialog({
+        title: 'Папка проекта',
+        properties: ['openDirectory']
+      })
+      if (result.canceled || !result.filePaths[0]) return null
+      folder = result.filePaths[0]
+    }
+    if (!existsSync(folder)) throw new Error('Папка проекта не найдена.')
     const existing = findChatByProject(folder)
     if (existing) return { chat: existing, created: false }
     const chat = await createChat(folder)

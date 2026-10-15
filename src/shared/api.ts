@@ -8,7 +8,7 @@ export interface LocalCoderApi {
   pickGguf(): Promise<Result<string | null>>
   probeLocal(): Promise<Result<ProbeResult>>
   listChats(): Promise<Result<ChatSummary[]>>
-  openProject(): Promise<Result<OpenProjectResult | null>>
+  openProject(folder?: string): Promise<Result<OpenProjectResult | null>>
   deleteChat(chatId: string): Promise<Result<null>>
   getChat(chatId: string): Promise<Result<ChatRecord>>
   ensureMap(chatId: string): Promise<Result<ProjectMap>>

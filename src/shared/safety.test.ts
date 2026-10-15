@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
-import { displayStream, parseModelOutput } from './parse'
+import { displayStream, parseModelOutput, shouldNudgeFileEdit } from './parse'
 import { isGitCommand, projectKey, resolveInsideProject } from './safety'
 import { defaultSettings, modelProblem, normalizeSettings } from './settings'
 
@@ -40,6 +40,18 @@ test('tool calls are separated from the visible answer', () => {
   assert.equal(parsed.calls[0]?.arguments.path, 'README.md')
   assert.deepEqual(parsed.errors, [])
   assert.equal(displayStream('Ответ <tool_call>{"name":"list_dir"'), 'Ответ')
+  const loose = parseModelOutput('ask_user\n{"question":"Какая кнопка?"}\n</tool_call>')
+  assert.equal(loose.calls[0]?.name, 'ask_user')
+  assert.equal(loose.calls[0]?.arguments.question, 'Какая кнопка?')
+  assert.equal(loose.visible, '')
+  assert.deepEqual(loose.errors, [])
+})
+
+test('a filesystem refusal is sent back to the tools', () => {
+  const refusal = 'Я не могу создавать или изменять файлы, так как я текстовый AI и не имею доступа к файловой системе.'
+  assert.equal(shouldNudgeFileEdit(refusal, 'почему ты не создала файлы в проекте?'), true)
+  assert.equal(shouldNudgeFileEdit('Сначала посмотрите структуру.', 'создай компонент кнопки'), true)
+  assert.equal(shouldNudgeFileEdit('Это новостной портал на React.', 'что это за проект?'), false)
 })
 
 test('the app stays closed until a model is selected', () => {

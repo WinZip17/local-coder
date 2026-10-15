@@ -154,18 +154,45 @@ export async function loadProjectMap(projectPath: string): Promise<ProjectMap | 
   return readMap(projectPath)
 }
 
-export function buildSystemPrompt(projectPath: string, map: ProjectMap): string {
-  const tree = map.tree.map((item) => `${item.type === 'dir' ? 'dir' : 'file'} ${item.path}`).join('\n').slice(0, 12_000)
-  const notes = map.notes.length ? map.notes.map((note) => `- ${note}`).join('\n') : '- Пока нет заметок агента.'
-  const docs = map.documents.map((item) => `### ${item.path}\n${item.excerpt}`).join('\n\n').slice(0, 20_000)
+export function systemPromptBudget(contextSize: number): number {
+  const room = Math.max(1024, contextSize) - 1536
+  return Math.max(1200, room * 2)
+}
 
-  return `Ты Local Coder, агент в десктопном приложении. Отвечай по-русски. Работай только внутри проекта:
+function clip(text: string, max: number): string {
+  const clean = text.trim()
+  if (clean.length <= max) return clean
+  return `${clean.slice(0, Math.max(0, max - 1))}…`
+}
+
+function takeLines(lines: string[], maxChars: number): { text: string; shown: number } {
+  const picked: string[] = []
+  let used = 0
+  for (const line of lines) {
+    const next = used + line.length + 1
+    if (picked.length > 0 && next > maxChars) break
+    if (picked.length === 0 && line.length > maxChars) {
+      picked.push(clip(line, maxChars))
+      return { text: picked.join('\n'), shown: 1 }
+    }
+    picked.push(line)
+    used = next
+  }
+  return { text: picked.join('\n'), shown: picked.length }
+}
+
+export function buildSystemPrompt(projectPath: string, map: ProjectMap, contextSize = 8192): string {
+  const budget = systemPromptBudget(contextSize)
+  const head = `Ты Local Coder, агент в десктопном приложении. Отвечай по-русски. Работай только внутри проекта:
 ${projectPath}
 
 Правила:
-- Сложную задачу дели на короткие шаги. Сначала смотри файлы, потом меняй их.
-- Если требование можно понять по-разному, вызови ask_user и не угадывай.
-- Правки записывай сразу через write_file или edit_file.
+- Карта ниже — только ориентир. В ней нет содержимого файлов. До правки посмотри проект инструментами.
+- Сложную задачу дели на короткие шаги. Сначала list_dir, search_in_project или read_file, потом меняй файлы.
+- Если пользователь просит «какую-нибудь», «один» или «любой» вариант, выбери первый подходящий сам. ask_user вызывай только когда без факта от пользователя задачу нельзя закончить.
+- search_in_project ищет одну подстроку. «button btn» не найдёт слово button. Для кнопки ищи «button» или «<button».
+- Правки записывай сразу через write_file или edit_file. Код и команды в ответе файл не меняют. Пока edit_file или write_file не вызваны, не пиши, что задача сделана.
+- Доступ к файлам этой папки уже есть. Новый файл записывай через write_file, существующий читай через read_file и меняй через edit_file. Не пиши, что ты текстовый AI, что нет доступа к файловой системе, и не проси пользователя создать файлы самому.
 - Git запрещён полностью: не запускай git и не открывай каталог .git. Коммиты остаются пользователю.
 - Команды терминала отправляй только через run_command. Они выполнятся после подтверждения пользователя, вывод попадёт в консоль.
 - Если в проекте и документах нет решения, вызови web_search. Поиск начнётся после подтверждения пользователя.
@@ -186,17 +213,31 @@ ${projectPath}
 - update_project_map: {"summary":"что это за проект","notes":["наблюдение"]}
 - run_command: {"command":"npm test"}
 - web_search: {"query":"поисковый запрос"}
-- ask_user: {"question":"что уточнить"}
+- ask_user: {"question":"что уточнить"}`
 
-Карта проекта:
-${map.summary}
+  const summary = clip(map.summary || 'Краткого описания нет.', 700)
+  const notes = map.notes.length ? map.notes.slice(-6).map((note) => `- ${clip(note, 240)}`).join('\n') : '- Пока нет заметок агента.'
+  const treeLines = map.tree.map((item) => `${item.type === 'dir' ? 'dir' : 'file'} ${item.path}`)
+  const docLines = map.documents.map((item) => item.path)
+  const tree = takeLines(treeLines, 2200)
+  const docs = takeLines(docLines, 800)
+  const treeTail = tree.shown < treeLines.length ? `\nПоказано ${tree.shown} из ${treeLines.length}. Остальное смотри через list_dir.` : ''
+  const docTail = docs.shown < docLines.length ? `\nПоказано ${docs.shown} из ${docLines.length}. Текст читай через read_file.` : ''
+  const body = `${head}
+
+Карта проекта — ориентир, не замена чтению файлов.
+Кратко:
+${summary}
 
 Заметки:
 ${notes}
 
 Структура:
-${tree || 'Файлы проекта пока не распознаны.'}
+${tree.text || 'Файлы проекта пока не распознаны.'}${treeTail}
 
-Документы и README:
-${docs || 'Документы не найдены.'}`
+Документы, только пути:
+${docs.text || 'Документы не найдены.'}${docTail}`
+
+  if (body.length <= budget) return body
+  return `${clip(body, budget)}\nДальше смотри файлы инструментами list_dir и read_file.`
 }

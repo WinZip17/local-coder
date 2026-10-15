@@ -1,5 +1,5 @@
 import type { ToolCall } from '../shared/parse'
-import { parseModelOutput } from '../shared/parse'
+import { parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
 import { modelProblem } from '../shared/settings'
 import type { AgentEvent, ChatMessage, PendingRequest } from '../shared/types'
 import { searchWeb } from './search'
@@ -27,6 +27,21 @@ function makeMessage(role: ChatMessage['role'], content: string, kind: ChatMessa
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || /abort|останов/i.test(error.message))
+}
+
+function lastUserText(chatId: string): string {
+  const messages = requireChat(chatId).messages
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'user') return messages[index]?.content ?? ''
+  }
+  return ''
+}
+
+function nudgeText(visible: string): string {
+  if (/не могу|доступа к файловой|текстов|cannot|can't access|no access|text AI/i.test(visible)) {
+    return 'Файлы проекта доступны через инструменты. Не пиши, что ты текстовый AI или что нет доступа к файловой системе. Сразу вызови write_file для нового файла или read_file и edit_file для существующего. Текст ответа файлы не меняет.'
+  }
+  return 'Файлы не изменены. Код и инструкции в ответе не применяются. Прочитай нужный файл через read_file и сразу вызови write_file или edit_file. Не описывай правку текстом и не отправляй пользователя в терминал.'
 }
 
 function transcript(chatId: string): TurnMessage[] {
@@ -136,6 +151,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
   const projectPath = requireChat(chatId).projectPath
   emit({ type: 'status', chatId, text: 'Обновляю карту проекта…' })
   let map = await ensureProjectMap(projectPath)
+  let edited = false
 
   for (let step = 1; step <= MAX_STEPS; step += 1) {
     if (signal.aborted) throw new DOMException('Остановлено', 'AbortError')
@@ -143,17 +159,31 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     const settings = getSettings()
     const problem = modelProblem(settings)
     if (problem) throw new Error(problem)
+    const contextSize = settings.activeProvider === 'local' ? settings.local.contextSize : 8192
     let streamed = ''
-    const output = await completeChat({
-      settings,
-      messages: [{ role: 'system', content: buildSystemPrompt(projectPath, map) }, ...transcript(chatId)],
-      onToken: (text) => {
-        streamed += text
-        emit({ type: 'token', chatId, text })
-      },
-      onStatus: (text) => emit({ type: 'status', chatId, text }),
-      signal
-    })
+    let output = ''
+    try {
+      output = await completeChat({
+        settings,
+        messages: [{ role: 'system', content: buildSystemPrompt(projectPath, map, contextSize) }, ...transcript(chatId)],
+        onToken: (text) => {
+          streamed += text
+          emit({ type: 'token', chatId, text })
+        },
+        onStatus: (text) => emit({ type: 'status', chatId, text }),
+        signal
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (step < MAX_STEPS && /пустой ответ/.test(message)) {
+        emit({ type: 'flush', chatId })
+        const reminder = makeMessage('tool', 'Ответ пустой. Прочитай файл с offset 1 и вызови edit_file с точным фрагментом.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      throw error
+    }
     emit({ type: 'flush', chatId })
     const parsed = parseModelOutput(output || streamed)
     if (parsed.visible) {
@@ -161,7 +191,15 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       await addMessage(chatId, message)
       emit({ type: 'message', chatId, message })
     }
-    if (!parsed.calls.length && !parsed.errors.length) return
+    if (!parsed.calls.length && !parsed.errors.length) {
+      if (!edited && step < MAX_STEPS && shouldNudgeFileEdit(parsed.visible, lastUserText(chatId))) {
+        const reminder = makeMessage('tool', nudgeText(parsed.visible), 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      return
+    }
 
     const results: string[] = []
     if (parsed.errors.length) results.push(parsed.errors.join('\n'))
@@ -172,6 +210,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         continue
       }
       const result = await runTool(chatId, projectPath, call, emit, signal)
+      if ((call.name === 'edit_file' || call.name === 'write_file') && !/ошибка/i.test(result)) edited = true
       results.push(result)
       if (call.name === 'ask_user') stopForQuestion = true
       if (call.name === 'update_project_map') map = await ensureProjectMap(projectPath)

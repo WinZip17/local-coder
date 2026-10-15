@@ -87,6 +87,14 @@ function isVramContextError(error: unknown): boolean {
   return /too large for the available VRAM/i.test(message)
 }
 
+function readableModelError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  if (/too long prompt or system message|shortening the system prompt|Failed to compress chat history/i.test(message)) {
+    return new Error('Запрос не поместился в контекст, поэтому модель не начала ответ. Увеличьте «Контекст, токены» в настройках.')
+  }
+  return error instanceof Error ? error : new Error(message)
+}
+
 function fewerGpuLayers(current: number): number {
   return Math.max(0, current - Math.max(4, Math.ceil(current / 3)))
 }
@@ -217,13 +225,17 @@ export async function completeLocal(options: {
         }
       }
       options.onStatus?.('Модель отвечает…')
-      const answer = await session.prompt(prompt, {
-        temperature: 0.2,
-        maxTokens: 2048,
-        signal: options.signal,
-        onTextChunk: options.onToken
-      })
-      return answer
+      try {
+        return await session.prompt(prompt, {
+          temperature: 0.2,
+          maxTokens: Math.min(2048, Math.max(256, Math.floor(options.settings.local.contextSize / 4))),
+          signal: options.signal,
+          onTextChunk: options.onToken
+        })
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error
+        throw readableModelError(error)
+      }
     } finally {
       await context.dispose().catch(() => undefined)
     }
