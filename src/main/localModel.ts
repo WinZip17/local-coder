@@ -1,10 +1,16 @@
 import { existsSync } from 'node:fs'
 import type { GpuMode, ProbeResult, Settings } from '../shared/types'
 
+interface GpuLayerBudget {
+  max?: number
+  fitContext: { contextSize: number }
+}
+
 interface LlamaHandle {
   gpu?: unknown
   loadModel: (options: {
     modelPath: string
+    gpuLayers?: number | GpuLayerBudget
     onLoadProgress?: (progress: number) => void
   }) => Promise<LlamaModel>
   dispose?: () => Promise<void>
@@ -13,6 +19,8 @@ interface LlamaHandle {
 interface LlamaModel {
   createContext: (options?: { contextSize?: number }) => Promise<LlamaContext>
   dispose: () => Promise<void>
+  gpuLayers: number
+  fileInsights: { totalLayers: number }
 }
 
 interface LlamaContext {
@@ -46,6 +54,8 @@ interface Turn {
 let chain: Promise<unknown> = Promise.resolve()
 let cached: { key: string; llama: LlamaHandle; model: LlamaModel } | null = null
 
+const layerRetries = 8
+
 function locked<T>(task: () => Promise<T>): Promise<T> {
   const run = chain.then(task, task)
   chain = run.then(
@@ -55,8 +65,43 @@ function locked<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-function cacheKey(settings: Settings): string {
-  return `${settings.local.modelPath}|${settings.local.gpu}|${settings.local.contextSize}`
+function cacheKey(settings: Settings, maxGpuLayers?: number): string {
+  const cap = maxGpuLayers == null ? 'fit' : String(maxGpuLayers)
+  return `${settings.local.modelPath}|${settings.local.gpu}|${settings.local.contextSize}|${cap}`
+}
+
+function gpuEnabled(settings: Settings, llama: LlamaHandle): boolean {
+  return settings.local.gpu !== 'cpu' && llama.gpu !== false
+}
+
+function layerBudget(settings: Settings, llama: LlamaHandle, maxGpuLayers?: number): number | GpuLayerBudget {
+  if (!gpuEnabled(settings, llama)) return 0
+  return {
+    ...(maxGpuLayers != null ? { max: maxGpuLayers } : {}),
+    fitContext: { contextSize: settings.local.contextSize }
+  }
+}
+
+function isVramContextError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /too large for the available VRAM/i.test(message)
+}
+
+function fewerGpuLayers(current: number): number {
+  return Math.max(0, current - Math.max(4, Math.ceil(current / 3)))
+}
+
+function placementMessage(model: LlamaModel, settings: Settings, gpu: string): string {
+  const total = model.fileInsights.totalLayers
+  const onGpu = model.gpuLayers
+  const context = settings.local.contextSize
+  if (gpu === 'cpu' || onGpu <= 0) {
+    return `Модель загружена. Расчёт идёт на CPU, слои лежат в оперативной памяти. Контекст ${context}.`
+  }
+  if (total > onGpu) {
+    return `Модель загружена. Расчёт: ${gpu}. На GPU ${onGpu} из ${total} слоёв, остальные ${total - onGpu} в оперативной памяти. Контекст ${context}.`
+  }
+  return `Модель загружена. Расчёт: ${gpu}. Все ${total} слоёв на GPU. Контекст ${context}.`
 }
 
 async function binding(): Promise<LlamaModule> {
@@ -74,8 +119,12 @@ function gpuOptions(gpu: GpuMode): { gpu?: 'cuda' | 'vulkan' | 'metal' | false; 
   return { gpu, build: 'never' }
 }
 
-async function load(settings: Settings, onStatus?: (text: string) => void): Promise<{ llama: LlamaHandle; model: LlamaModel }> {
-  const key = cacheKey(settings)
+async function load(
+  settings: Settings,
+  onStatus?: (text: string) => void,
+  maxGpuLayers?: number
+): Promise<{ llama: LlamaHandle; model: LlamaModel }> {
+  const key = cacheKey(settings, maxGpuLayers)
   if (cached?.key === key) return cached
   await disposeLocal()
   onStatus?.('Загружаю локальную модель…')
@@ -83,10 +132,38 @@ async function load(settings: Settings, onStatus?: (text: string) => void): Prom
   const llama = await llamaCpp.getLlama(gpuOptions(settings.local.gpu))
   const model = await llama.loadModel({
     modelPath: settings.local.modelPath,
+    gpuLayers: layerBudget(settings, llama, maxGpuLayers),
     onLoadProgress: (progress) => onStatus?.(`Загрузка модели ${Math.round(progress * 100)}%`)
   })
   cached = { key, llama, model }
   return cached
+}
+
+async function openContext(
+  settings: Settings,
+  onStatus?: (text: string) => void
+): Promise<{ llama: LlamaHandle; model: LlamaModel; context: LlamaContext }> {
+  let maxGpuLayers: number | undefined
+  let lastError: unknown
+  for (let attempt = 0; attempt < layerRetries; attempt++) {
+    const loaded = await load(settings, onStatus, maxGpuLayers)
+    try {
+      const context = await loaded.model.createContext({ contextSize: settings.local.contextSize })
+      return { ...loaded, context }
+    } catch (error) {
+      lastError = error
+      const onGpu = loaded.model.gpuLayers
+      if (!isVramContextError(error) || onGpu <= 0) throw error
+      const next = fewerGpuLayers(onGpu)
+      if (maxGpuLayers != null && next >= maxGpuLayers) throw error
+      maxGpuLayers = next
+      onStatus?.(
+        `Контекст ${settings.local.contextSize} не помещается рядом с текущими слоями на GPU. Оставляю больше слоёв в оперативной памяти, на GPU будет не больше ${next}.`
+      )
+      await disposeLocal()
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('Не удалось создать контекст модели.')
 }
 
 export async function disposeLocal(): Promise<void> {
@@ -100,12 +177,10 @@ export async function disposeLocal(): Promise<void> {
 export async function probeLocal(settings: Settings): Promise<ProbeResult> {
   if (!existsSync(settings.local.modelPath)) throw new Error('Файл локальной модели не найден.')
   return locked(async () => {
-    const loaded = await load(settings, () => undefined)
-    const gpu = loaded.llama.gpu === false ? 'cpu' : String(loaded.llama.gpu ?? 'cpu')
-    const message = gpu === 'cpu'
-      ? 'Модель загружена. CUDA и Vulkan не прошли проверку, расчёт пойдёт на CPU.'
-      : `Модель загружена. Расчёт: ${gpu}.`
-    return { gpu, message }
+    const opened = await openContext(settings)
+    await opened.context.dispose().catch(() => undefined)
+    const gpu = opened.llama.gpu === false ? 'cpu' : String(opened.llama.gpu ?? 'cpu')
+    return { gpu, message: placementMessage(opened.model, settings, gpu) }
   })
 }
 
@@ -120,8 +195,7 @@ export async function completeLocal(options: {
 }): Promise<string> {
   return locked(async () => {
     const llamaCpp = await binding()
-    const loaded = await load(options.settings, options.onStatus)
-    const context = await loaded.model.createContext({ contextSize: options.settings.local.contextSize })
+    const { context } = await openContext(options.settings, options.onStatus)
     try {
       const session = new llamaCpp.LlamaChatSession({
         contextSequence: context.getSequence(),

@@ -28,6 +28,8 @@ export function App() {
   const [notice, setNotice] = useState('')
   const [deleteId, setDeleteId] = useState<string | null>(null)
   const [answer, setAnswer] = useState('')
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [consoleOpen, setConsoleOpen] = useState(true)
   const activeRef = useRef<string | null>(null)
   const threadRef = useRef<HTMLDivElement | null>(null)
   activeRef.current = activeId
@@ -199,11 +201,23 @@ export function App() {
   return (
     <>
       {ready && (
-        <div className="shell">
-          <aside className="sidebar">
-            <div className="brand">
-              <strong>Local Coder</strong>
-              <span>один чат — один проект</span>
+        <div className={`shell${sidebarOpen ? '' : ' sidebar-collapsed'}${consoleOpen ? '' : ' console-collapsed'}`}>
+          <aside id="chat-sidebar" className="sidebar">
+            <div className="sidebar-slide">
+            <div className="brand-row">
+              <div className="brand">
+                <strong>Local Coder</strong>
+                <span>один чат — один проект</span>
+              </div>
+              <button
+                type="button"
+                className="quiet"
+                aria-expanded={sidebarOpen}
+                aria-controls="chat-sidebar"
+                onClick={() => setSidebarOpen(false)}
+              >
+                Скрыть
+              </button>
             </div>
             <button className="primary wide" type="button" onClick={() => void openProject()}>Открыть проект</button>
             <div className="chat-list">
@@ -225,9 +239,36 @@ export function App() {
               ))}
               {!chats.length && <p className="empty">Чатов пока нет.</p>}
             </div>
+            <div className="sidebar-foot">
+              <p className="fine">{activeModelLabel(settings)}</p>
+              <button className="wide" type="button" onClick={() => setSettingsOpen(true)}>Настройки</button>
+            </div>
+            </div>
           </aside>
 
           <section className="workspace">
+            {!sidebarOpen && (
+              <button
+                type="button"
+                className="restore restore-left"
+                aria-expanded={false}
+                aria-controls="chat-sidebar"
+                onClick={() => setSidebarOpen(true)}
+              >
+                Чаты
+              </button>
+            )}
+            {!consoleOpen && (
+              <button
+                type="button"
+                className="restore restore-bottom"
+                aria-expanded={false}
+                aria-controls="project-console"
+                onClick={() => setConsoleOpen(true)}
+              >
+                Консоль
+              </button>
+            )}
             {chat ? (
               <>
                 <header className="topbar">
@@ -238,7 +279,7 @@ export function App() {
                   </div>
                   <div className="top-actions">
                     <button type="button" onClick={() => void refreshMap()}>Обновить карту</button>
-                    <button type="button" onClick={() => setSettingsOpen(true)}>{activeModelLabel(settings)}</button>
+                    <button type="button" onClick={() => setSettingsOpen(true)}>Настройки</button>
                   </div>
                 </header>
                 {error && <p className="banner error">{error}</p>}
@@ -310,16 +351,28 @@ export function App() {
             )}
           </section>
 
-          <section className="console">
+          <section id="project-console" className="console">
+            <div className="console-slide">
             <header>
               <strong>Консоль</strong>
-              <span>
-                {runner.running && runner.chatId === activeId
-                  ? runner.command
-                  : runner.running
-                    ? 'Команда выполняется в другом чате'
-                    : 'Проект не запущен'}
-              </span>
+              <div className="console-tools">
+                <span>
+                  {runner.running && runner.chatId === activeId
+                    ? runner.command
+                    : runner.running
+                      ? 'Команда выполняется в другом чате'
+                      : 'Проект не запущен'}
+                </span>
+                <button
+                  type="button"
+                  className="quiet"
+                  aria-expanded={consoleOpen}
+                  aria-controls="project-console"
+                  onClick={() => setConsoleOpen(false)}
+                >
+                  Скрыть
+                </button>
+              </div>
             </header>
             <div className="log">
               {logs.map((line) => (
@@ -346,6 +399,7 @@ export function App() {
                 <button type="submit" disabled={!chat || !command.trim()}>Запустить</button>
               )}
             </form>
+            </div>
           </section>
         </div>
       )}

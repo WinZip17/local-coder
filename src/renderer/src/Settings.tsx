@@ -16,6 +16,7 @@ export function SettingsScreen(props: {
   const [busy, setBusy] = useState(false)
   const [ollamaModels, setOllamaModels] = useState<string[]>([])
   const [apiModels, setApiModels] = useState<string[]>([])
+  const [tab, setTab] = useState<'model' | 'proxy'>('model')
 
   useEffect(() => setDraft(props.settings), [props.settings])
 
@@ -24,6 +25,7 @@ export function SettingsScreen(props: {
   async function persist(close: boolean): Promise<Settings | null> {
     const problem = modelProblem(draft)
     if (problem) {
+      setTab(/прокси/i.test(problem) ? 'proxy' : 'model')
       setError(problem)
       setInfo('')
       return null
@@ -101,10 +103,32 @@ export function SettingsScreen(props: {
       >
         <header className="settings-head">
           <p className="eyebrow">Local Coder</p>
-          <h1>Модель</h1>
+          <h1>Настройки</h1>
           <p>{props.gate ? emptyNotice : `Сейчас: ${activeModelLabel(draft)}. Смена применяется со следующего сообщения.`}</p>
         </header>
 
+        <div className="tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'model'}
+            className={tab === 'model' ? 'tab active' : 'tab'}
+            onClick={() => setTab('model')}
+          >
+            Модель
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === 'proxy'}
+            className={tab === 'proxy' ? 'tab active' : 'tab'}
+            onClick={() => setTab('proxy')}
+          >
+            Прокси
+          </button>
+        </div>
+
+        {tab === 'model' && <>
         <div className="choice-row">
           {([
             ['local', 'Локальная'],
@@ -126,7 +150,7 @@ export function SettingsScreen(props: {
         {draft.activeProvider === 'local' && (
           <section>
             <h2>Локальная GGUF</h2>
-            <p className="hint">Файл запускается внутри приложения. Авто выбирает CUDA, если она доступна, иначе Vulkan. Если видеокарта не проходит проверку, расчёт идёт на CPU.</p>
+            <p className="hint">Файл запускается внутри приложения. Авто выбирает CUDA, если она доступна, иначе Vulkan. Если видеокарта не проходит проверку, расчёт идёт на CPU. Слои, которым не хватает видеопамяти рядом с контекстом, остаются в оперативной памяти.</p>
             <label>
               Файл модели
               <div className="inline">
@@ -228,8 +252,9 @@ export function SettingsScreen(props: {
             <button type="button" disabled={busy} onClick={() => void loadApi()}>Загрузить список моделей</button>
           </section>
         )}
+        </>}
 
-        <section>
+        {tab === 'proxy' && <section>
           <h2>Прокси</h2>
           <p className="hint">Используется для API и поиска. Локальные адреса и запуск проекта идут напрямую.</p>
           <label className="check">
@@ -293,7 +318,7 @@ export function SettingsScreen(props: {
               />
             </label>
           </div>
-        </section>
+        </section>}
 
         {error && <p className="banner error">{error}</p>}
         {info && <p className="banner info">{info}</p>}
