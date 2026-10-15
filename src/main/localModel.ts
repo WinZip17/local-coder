@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import type { GpuMode, ProbeResult, Settings } from '../shared/types'
 
 interface LlamaHandle {
@@ -33,7 +34,7 @@ interface LlamaSession {
 }
 
 interface LlamaModule {
-  getLlama: (options?: { gpu?: 'cuda' | 'vulkan' | 'metal' | false }) => Promise<LlamaHandle>
+  getLlama: (options?: { gpu?: 'cuda' | 'vulkan' | 'metal' | false; build?: 'never' }) => Promise<LlamaHandle>
   LlamaChatSession: new (options: { contextSequence: unknown; systemPrompt?: string }) => LlamaSession
 }
 
@@ -67,10 +68,10 @@ async function binding(): Promise<LlamaModule> {
   }
 }
 
-function gpuOptions(gpu: GpuMode): { gpu?: 'cuda' | 'vulkan' | 'metal' | false } | undefined {
-  if (gpu === 'auto') return undefined
-  if (gpu === 'cpu') return { gpu: false }
-  return { gpu }
+function gpuOptions(gpu: GpuMode): { gpu?: 'cuda' | 'vulkan' | 'metal' | false; build: 'never' } {
+  if (gpu === 'cpu') return { gpu: false, build: 'never' }
+  if (gpu === 'auto') return { build: 'never' }
+  return { gpu, build: 'never' }
 }
 
 async function load(settings: Settings, onStatus?: (text: string) => void): Promise<{ llama: LlamaHandle; model: LlamaModel }> {
@@ -79,8 +80,7 @@ async function load(settings: Settings, onStatus?: (text: string) => void): Prom
   await disposeLocal()
   onStatus?.('Загружаю локальную модель…')
   const llamaCpp = await binding()
-  const options = gpuOptions(settings.local.gpu)
-  const llama = options ? await llamaCpp.getLlama(options) : await llamaCpp.getLlama()
+  const llama = await llamaCpp.getLlama(gpuOptions(settings.local.gpu))
   const model = await llama.loadModel({
     modelPath: settings.local.modelPath,
     onLoadProgress: (progress) => onStatus?.(`Загрузка модели ${Math.round(progress * 100)}%`)
@@ -98,10 +98,14 @@ export async function disposeLocal(): Promise<void> {
 }
 
 export async function probeLocal(settings: Settings): Promise<ProbeResult> {
+  if (!existsSync(settings.local.modelPath)) throw new Error('Файл локальной модели не найден.')
   return locked(async () => {
     const loaded = await load(settings, () => undefined)
-    const gpu = String(loaded.llama.gpu ?? settings.local.gpu)
-    return { gpu, message: `Модель загружена. GPU: ${gpu}.` }
+    const gpu = loaded.llama.gpu === false ? 'cpu' : String(loaded.llama.gpu ?? 'cpu')
+    const message = gpu === 'cpu'
+      ? 'Модель загружена. CUDA и Vulkan не прошли проверку, расчёт пойдёт на CPU.'
+      : `Модель загружена. Расчёт: ${gpu}.`
+    return { gpu, message }
   })
 }
 

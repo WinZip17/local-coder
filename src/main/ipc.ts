@@ -1,10 +1,9 @@
 import { dialog, type BrowserWindow } from 'electron'
-import { existsSync } from 'node:fs'
 import { modelProblem } from '../shared/settings'
 import type { AgentEvent, Result, RunnerEvent } from '../shared/types'
 import { answerRequest, cancelChat, decideRequest, isChatBusy, sendMessage } from './agent'
 import { probeLocal } from './localModel'
-import { ensureProjectMap, loadProjectMap } from './project'
+import { ensureProjectMap } from './project'
 import { listApiModels, listOllamaModels } from './providers'
 import { bindRunner, getLogs, getRunnerState, startCommand, stopCommand } from './runner'
 import { createChat, deleteChat, findChatByProject, getChat, getSettings, initStore, listChats, saveSettings } from './store'
@@ -41,15 +40,7 @@ export async function registerIpc(getWindow: () => BrowserWindow | null): Promis
   )
 
   ipcMain.handle('settings:get', () => guard(() => getSettings()))
-  ipcMain.handle('settings:save', (_event, input: unknown) => guard(async () => {
-    const settings = await saveSettings(input)
-    if (settings.activeProvider === 'local' && settings.local.modelPath && !existsSync(settings.local.modelPath)) {
-      throw new Error('Файл локальной модели не найден. Остальные настройки сохранены.')
-    }
-    const problem = modelProblem(settings)
-    if (problem && settings.activeProvider) throw new Error(`${problem} Настройки сохранены.`)
-    return settings
-  }))
+  ipcMain.handle('settings:save', (_event, input: unknown) => guard(() => saveSettings(input)))
   ipcMain.handle('ollama:list', (_event, baseUrl: string) => guard(() => listOllamaModels(baseUrl, getSettings())))
   ipcMain.handle('api:list', () => guard(() => listApiModels(getSettings())))
   ipcMain.handle('dialog:gguf', () => guard(async () => {
@@ -91,11 +82,6 @@ export async function registerIpc(getWindow: () => BrowserWindow | null): Promis
     const chat = getChat(chatId)
     if (!chat) throw new Error('Чат не найден.')
     return ensureProjectMap(chat.projectPath)
-  }))
-  ipcMain.handle('project:get', (_event, chatId: string) => guard(async () => {
-    const chat = getChat(chatId)
-    if (!chat) throw new Error('Чат не найден.')
-    return loadProjectMap(chat.projectPath)
   }))
   ipcMain.handle('agent:send', (_event, chatId: string, text: string) => guard(() => sendMessage(chatId, text, (event) => send('agent:event', event))))
   ipcMain.handle('agent:answer', (_event, requestId: string, text: string) => guard(() => answerRequest(requestId, text)))

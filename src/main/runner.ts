@@ -70,6 +70,11 @@ export function startCommand(chatId: string, command: string, cwd: string): void
   next.stderr?.on('data', (chunk: Buffer) => push(chatId, 'stderr', chunk.toString('utf8')))
   next.on('error', (error) => {
     push(chatId, 'system', error.message)
+    if (child === next) {
+      child = null
+      active = null
+      publishState()
+    }
   })
   next.on('exit', (code) => {
     if (child === next) {
@@ -99,22 +104,25 @@ export async function runAndCollect(chatId: string, command: string, cwd: string
   if (!current) throw new Error('Не удалось запустить команду.')
   return await new Promise((resolve, reject) => {
     const chunks: string[] = []
+    let settled = false
     const take = (chunk: Buffer) => {
       chunks.push(chunk.toString('utf8'))
       if (chunks.join('').length > 100_000) chunks.splice(0, chunks.length - 20)
     }
+    const finish = (handler: () => void) => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      handler()
+    }
+    const onAbort = () => stopCommand()
     current.stdout?.on('data', take)
     current.stderr?.on('data', take)
-    const onAbort = () => stopCommand()
     signal?.addEventListener('abort', onAbort, { once: true })
-    current.on('error', (error) => {
-      signal?.removeEventListener('abort', onAbort)
-      reject(error)
-    })
-    current.on('exit', (code) => {
-      signal?.removeEventListener('abort', onAbort)
+    current.on('error', (error) => finish(() => reject(error)))
+    current.on('exit', (code) => finish(() => {
       const output = chunks.join('').slice(-100_000)
       resolve(output.trim() ? output : `Команда завершилась с кодом ${code ?? 'null'} без вывода.`)
-    })
+    }))
   })
 }

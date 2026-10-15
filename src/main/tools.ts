@@ -89,8 +89,9 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
     const query = textArg(args, 'query').trim()
     if (query.length < 2) throw new Error('Запрос поиска короче 2 символов.')
     const hits: string[] = []
+    let seen = 0
     const walk = async (dir: string): Promise<void> => {
-      if (hits.length >= 40) return
+      if (hits.length >= 40 || seen > 4000) return
       let entries
       try {
         entries = await readdir(dir, { withFileTypes: true })
@@ -103,6 +104,7 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
           if (!SKIP_DIRS.has(entry.name)) await walk(path.join(dir, entry.name))
           continue
         }
+        if (++seen > 4000) return
         const ext = entry.name.split('.').pop()?.toLowerCase() ?? ''
         if (BINARY.has(ext)) continue
         const full = path.join(dir, entry.name)
