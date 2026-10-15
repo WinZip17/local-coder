@@ -51,6 +51,9 @@ test('a filesystem refusal is sent back to the tools', () => {
   const refusal = 'Я не могу создавать или изменять файлы, так как я текстовый AI и не имею доступа к файловой системе.'
   assert.equal(shouldNudgeFileEdit(refusal, 'почему ты не создала файлы в проекте?'), true)
   assert.equal(shouldNudgeFileEdit('Сначала посмотрите структуру.', 'создай компонент кнопки'), true)
+  assert.equal(shouldNudgeFileEdit('Сначала посмотрите структуру.', 'создай компонент кнопки', 1), false)
+  assert.equal(shouldNudgeFileEdit("Роль 'POLITIC' не существует в 'UserRole'. Уточните, какую роль удалить.", 'удали роль POLITIC'), false)
+  assert.equal(shouldNudgeFileEdit("Роль 'POLITIC' отсутствует в 'UserRole'.", 'удали роль POLITIC', 1), false)
   assert.equal(shouldNudgeFileEdit('Это новостной портал на React.', 'что это за проект?'), false)
 })
 

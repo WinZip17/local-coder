@@ -106,10 +106,14 @@ export function parseModelOutput(text: string): { visible: string; calls: ToolCa
 
 const fileRefusal = /не могу[\s\S]{0,120}(?:создавать|изменять|создать|изменить|файл)|(?:нет|не имею) доступа к файловой|текстов(?:ый|ым)\s+AI|cannot (?:create|modify|change|write|access)|can(?:not|'t) access (?:the |your )?(?:file|filesystem)|no access to (?:the |your )?(?:file|filesystem)|I(?:'m| am) (?:just )?a text/i
 const fileRequest = /создай|создать|создайте|создал|добавь|добавить|измени|изменить|поменяй|переименуй|напиши|удали|исправь|вставь|перекрась|поправь|реализуй|сделай(?:те)?\s+\S{0,40}файл/i
+const nothingToChange = /не существует|отсутствует|не найден|нет такой|нечего (?:удалять|менять|изменять)|уже (?:нет|отсутствует)|does not exist|doesn't exist|not found|nothing to (?:delete|change|edit)/i
 
-export function shouldNudgeFileEdit(visible: string, userText: string): boolean {
+export function shouldNudgeFileEdit(visible: string, userText: string, nudges = 0): boolean {
+  if (nothingToChange.test(visible) && !/```/.test(visible)) return false
+  if (nudges >= 2) return false
   if (fileRefusal.test(visible)) return true
   if (/```/.test(visible)) return true
+  if (nudges >= 1) return false
   return fileRequest.test(userText)
 }
 

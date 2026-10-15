@@ -1,5 +1,9 @@
+import { readdir, readFile, stat } from 'node:fs/promises'
+import path from 'node:path'
+import { describedLineEdit, describedSnippets, snippetToEdit } from '../shared/edits'
 import type { ToolCall } from '../shared/parse'
 import { parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
+import { resolveInsideProject } from '../shared/safety'
 import { modelProblem } from '../shared/settings'
 import type { AgentEvent, ChatMessage, PendingRequest } from '../shared/types'
 import { searchWeb } from './search'
@@ -27,6 +31,21 @@ function makeMessage(role: ChatMessage['role'], content: string, kind: ChatMessa
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && (error.name === 'AbortError' || /abort|останов/i.test(error.message))
+}
+
+function previousAssistant(chatId: string): string {
+  const messages = requireChat(chatId).messages
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'assistant') return messages[index]?.content ?? ''
+  }
+  return ''
+}
+
+function sameText(left: string, right: string): boolean {
+  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim().toLowerCase()
+  const first = normalize(left)
+  const second = normalize(right)
+  return first.length > 0 && first === second
 }
 
 function lastUserText(chatId: string): string {
@@ -82,6 +101,72 @@ function waitForUser(request: PendingRequest, emit: (event: AgentEvent) => void,
     signal.addEventListener('abort', onAbort, { once: true })
     waiters.set(request.id, finish)
   })
+}
+
+const SOURCE_EXT = new Set(['ts', 'tsx', 'js', 'jsx', 'vue', 'svelte', 'css', 'scss', 'html', 'json', 'py', 'go', 'rs', 'java', 'kt', 'cs', 'php', 'rb'])
+const SKIP_DIRS = new Set(['node_modules', '.git', '.local-coder', 'dist', 'build', 'out', 'release', 'coverage', '.next', '.nuxt', 'target', 'vendor', '__pycache__', '.venv', 'venv', 'bin', 'obj'])
+
+async function sourceFiles(root: string): Promise<Array<{ path: string; text: string }>> {
+  const files: Array<{ path: string; text: string }> = []
+  const walk = async (dir: string): Promise<void> => {
+    if (files.length >= 2000) return
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (files.length >= 2000) return
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
+        await walk(path.join(dir, entry.name))
+        continue
+      }
+      const ext = entry.name.split('.').pop()?.toLowerCase() ?? ''
+      if (!SOURCE_EXT.has(ext)) continue
+      const full = path.join(dir, entry.name)
+      try {
+        const info = await stat(full)
+        if (info.size > 400_000) continue
+        const text = await readFile(full, 'utf8')
+        files.push({ path: path.relative(root, full).split(path.sep).join('/'), text })
+      } catch {
+        continue
+      }
+    }
+  }
+  await walk(root)
+  return files
+}
+
+async function editsFromAnswer(projectPath: string, visible: string, userText: string): Promise<ToolCall[]> {
+  const calls: ToolCall[] = []
+  for (const item of describedSnippets(visible)) {
+    let target = ''
+    try {
+      target = resolveInsideProject(projectPath, item.path)
+    } catch {
+      continue
+    }
+    let fileText = ''
+    try {
+      fileText = await readFile(target, 'utf8')
+    } catch {
+      continue
+    }
+    const edit = snippetToEdit(fileText, item.snippet)
+    if (!edit) continue
+    calls.push({
+      name: 'edit_file',
+      arguments: { path: item.path, oldText: edit.oldText, newText: edit.newText }
+    })
+  }
+  if (!calls.length) {
+    const line = describedLineEdit(await sourceFiles(projectPath), userText, visible)
+    if (line) calls.push({ name: 'edit_file', arguments: { path: line.path, oldText: line.oldText, newText: line.newText } })
+  }
+  return calls
 }
 
 async function runTool(chatId: string, projectPath: string, call: ToolCall, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<string> {
@@ -152,6 +237,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
   emit({ type: 'status', chatId, text: 'Обновляю карту проекта…' })
   let map = await ensureProjectMap(projectPath)
   let edited = false
+  let nudges = 0
 
   for (let step = 1; step <= MAX_STEPS; step += 1) {
     if (signal.aborted) throw new DOMException('Остановлено', 'AbortError')
@@ -186,13 +272,19 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     }
     emit({ type: 'flush', chatId })
     const parsed = parseModelOutput(output || streamed)
+    if (parsed.visible && sameText(parsed.visible, previousAssistant(chatId))) return
+    const alreadyWrites = parsed.calls.some((call) => call.name === 'edit_file' || call.name === 'write_file')
+    if (!edited && !alreadyWrites && parsed.visible) {
+      parsed.calls.push(...await editsFromAnswer(projectPath, parsed.visible, lastUserText(chatId)))
+    }
     if (parsed.visible) {
       const message = makeMessage('assistant', parsed.visible, 'text')
       await addMessage(chatId, message)
       emit({ type: 'message', chatId, message })
     }
     if (!parsed.calls.length && !parsed.errors.length) {
-      if (!edited && step < MAX_STEPS && shouldNudgeFileEdit(parsed.visible, lastUserText(chatId))) {
+      if (!edited && step < MAX_STEPS && shouldNudgeFileEdit(parsed.visible, lastUserText(chatId), nudges)) {
+        nudges += 1
         const reminder = makeMessage('tool', nudgeText(parsed.visible), 'tool')
         await addMessage(chatId, reminder)
         emit({ type: 'message', chatId, message: reminder })
