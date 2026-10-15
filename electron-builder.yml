@@ -1,0 +1,19 @@
+appId: dev.localcoder.app
+productName: Local Coder
+asar: true
+asarUnpack:
+  - node_modules/@node-llama-cpp/**/*.node
+  - node_modules/node-llama-cpp/**/*
+directories:
+  output: release
+files:
+  - out/**/*
+  - package.json
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+npmRebuild: false
