@@ -12,6 +12,10 @@ export interface ProxySettings {
 
 export interface Settings {
   activeProvider: ProviderId | null
+  generation: {
+    temperature: number
+    maxTokens: number
+  }
   local: {
     modelPath: string
     gpu: GpuMode

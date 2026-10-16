@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { describedLineEdit, describedSnippets, snippetToEdit } from './edits'
+import { componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from './edits'
 
 const buttonFile = `export function Filters() {
   return (
@@ -68,6 +68,23 @@ test('new react files are taken from path comments and package.json', () => {
   assert.equal(snippets[0]?.snippet.includes('// src/App.tsx'), false)
   assert.match(snippets[0]?.snippet ?? '', /Привет, я родился/)
   assert.equal(snippets[1]?.snippet.includes('style.css'), false)
+})
+
+test('a shown README is written to README.md', () => {
+  const visible = '```markdown\n# Привет, я родился\n\nОдна страница с двумя кнопками.\n\n## Запуск\n\nnpm install\nnpm run dev\n```'
+  const snippets = describedSnippets(visible, 'Обнови содержимое файла README.md')
+  assert.equal(snippets[0]?.path, 'README.md')
+  assert.match(snippets[0]?.snippet ?? '', /Привет, я родился/)
+  const next = replacementContent('Обнови содержимое файла README.md', 'README.md', snippets[0]?.snippet ?? '', '# React + TypeScript + Vite\n')
+  assert.match(next ?? '', /Привет, я родился/)
+  assert.equal(replacementContent('что это за проект?', 'README.md', snippets[0]?.snippet ?? '', ''), null)
+})
+
+test('a full App component without a path is still the page', () => {
+  const visible = `Изменил App.tsx.\n\`\`\`tsx\nimport { useState } from 'react';\n\nfunction App() {\n  const handleRefreshClick = () => {\n    window.location.reload();\n  };\n\n  return (\n    <div>\n      <h1>Привет, я родился</h1>\n      <button onClick={handleRefreshClick}>Обновить страницу</button>\n    </div>\n  );\n}\n\nexport default App;\n\`\`\``
+  assert.match(componentSnippet(visible) ?? '', /Привет, я родился/)
+  assert.equal(describedSnippets(visible).length, 0)
+  assert.equal(componentSnippet('```tsx\nconst x = 1\n```'), null)
 })
 
 test('an unrelated fragment is not applied', () => {

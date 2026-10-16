@@ -42,6 +42,62 @@ function clip(text: string, max = 12_000): string {
   return `${text.slice(0, max)}\n… обрезано, всего ${text.length} символов.`
 }
 
+function inventedPath(projectPath: string, relativePath: string): boolean {
+  const parts = relativePath.split('/').filter(Boolean)
+  return parts[0] === 'Project' || parts.includes(path.basename(projectPath))
+}
+
+async function locateProjectFile(projectPath: string, requested: string): Promise<{ target: string; path: string }> {
+  const normalized = requested.replace(/\\/g, '/').replace(/^\.\//, '')
+  const direct = resolveInsideProject(projectPath, normalized)
+  const parts = normalized.split('/').filter(Boolean)
+  const tail = parts.slice(-2).join('/')
+  const invented = inventedPath(projectPath, normalized)
+  let directFile = false
+  if (existsSync(direct)) {
+    try {
+      directFile = (await stat(direct)).isFile()
+    } catch {
+      directFile = false
+    }
+  }
+  if (directFile && !invented) return { target: direct, path: normalized }
+  const hits: string[] = []
+  const walk = async (dir: string): Promise<void> => {
+    if (hits.length > 8) return
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (hits.length > 8) return
+      if (entry.isDirectory()) {
+        if (SKIP_DIRS.has(entry.name) || entry.name.startsWith('.')) continue
+        await walk(path.join(dir, entry.name))
+        continue
+      }
+      const relative = path.relative(projectPath, path.join(dir, entry.name)).split(path.sep).join('/')
+      if (relative === tail || relative.endsWith(`/${tail}`)) hits.push(relative)
+    }
+  }
+  if (!directFile || invented) await walk(projectPath)
+  const closer = hits
+    .filter((relative) => !inventedPath(projectPath, relative))
+    .sort((left, right) => left.length - right.length)
+  if (invented) {
+    const found = closer[0]
+    if (found) return { target: resolveInsideProject(projectPath, found), path: found }
+    throw new Error(`Файл ${normalized} лежит вне корня проекта. Укажи путь от корня, например src/App.jsx.`)
+  }
+  if (!directFile && closer.length === 1) {
+    const found = closer[0] ?? normalized
+    return { target: resolveInsideProject(projectPath, found), path: found }
+  }
+  return { target: direct, path: normalized }
+}
+
 async function assertParentInside(projectPath: string, target: string): Promise<void> {
   const root = await realpath(projectPath).catch(() => path.resolve(projectPath))
   let current = target
@@ -143,19 +199,23 @@ export async function executeTool(projectPath: string, call: ToolCall): Promise<
   if (call.name === 'write_file') {
     if (typeof args.content !== 'string') throw new Error('write_file требует поле content со строкой.')
     if (args.content.length > 1_500_000) throw new Error('Файл слишком большой для одной записи.')
-    const filePath = textArg(args, 'path')
-    const target = resolveInsideProject(projectPath, filePath)
-    await assertParentInside(projectPath, target)
-    await writeAtomic(target, args.content)
-    return `write_file ${filePath}: записано ${Buffer.byteLength(args.content)} байт.`
+    const requested = textArg(args, 'path')
+    const located = await locateProjectFile(projectPath, requested)
+    await assertParentInside(projectPath, located.target)
+    await writeAtomic(located.target, args.content)
+    const normalized = requested.replace(/\\/g, '/').replace(/^\.\//, '')
+    const note = located.path === normalized ? '' : ` вместо ${normalized}`
+    return `write_file ${located.path}${note}: записано ${Buffer.byteLength(args.content)} байт.`
   }
 
   if (call.name === 'edit_file') {
-    const filePath = textArg(args, 'path')
+    const requested = textArg(args, 'path')
     const oldText = textArg(args, 'oldText')
     const newText = typeof args.newText === 'string' ? args.newText : ''
     if (!oldText) throw new Error('edit_file требует точный oldText.')
-    const target = resolveInsideProject(projectPath, filePath)
+    const located = await locateProjectFile(projectPath, requested)
+    const filePath = located.path
+    const target = located.target
     const current = await readFile(target, 'utf8')
     const count = current.split(oldText).length - 1
     if (count === 0) throw new Error('Фрагмент не найден. Прочитай файл и передай точный текст.')

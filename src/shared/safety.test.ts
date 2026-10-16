@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import path from 'node:path'
 import test from 'node:test'
-import { displayStream, parseModelOutput, shouldNudgeFileEdit } from './parse'
+import { displayStream, missingToolArgument, parseModelOutput, shouldNudgeFileEdit } from './parse'
 import { isGitCommand, projectKey, resolveInsideProject } from './safety'
 import { defaultSettings, modelProblem, normalizeSettings } from './settings'
 
@@ -45,6 +45,38 @@ test('tool calls are separated from the visible answer', () => {
   assert.equal(loose.calls[0]?.arguments.question, 'Какая кнопка?')
   assert.equal(loose.visible, '')
   assert.deepEqual(loose.errors, [])
+  const colon = parseModelOutput('ask_user: {"question":"Какой шаблон?"}')
+  assert.equal(colon.calls[0]?.name, 'ask_user')
+  assert.equal(colon.calls[0]?.arguments.question, 'Какой шаблон?')
+  assert.equal(colon.visible, '')
+  const bare = parseModelOutput('{"question":"1) npx create-vite@latest . --template react-ts --overwrite\\n2) npx create-vite@latest . --template react --overwrite"}')
+  assert.equal(bare.calls[0]?.name, 'ask_user')
+  assert.match(String(bare.calls[0]?.arguments.question), /react-ts/)
+  assert.equal(bare.visible, '')
+  assert.deepEqual(bare.errors, [])
+  const named = parseModelOutput('{"name":"ask_user","arguments":{"question":"TypeScript или JavaScript?"}}')
+  assert.equal(named.calls[0]?.name, 'ask_user')
+  assert.equal(named.calls[0]?.arguments.question, 'TypeScript или JavaScript?')
+  assert.equal(named.visible, '')
+})
+
+test('deepseek tool markup becomes a command', () => {
+  const parsed = parseModelOutput(`Запускаю официальный генератор.
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="run_command">
+<｜｜DSML｜｜ parameter name="command" string="true">npx --yes create-vite@latest . --template react --overwrite</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>`)
+  assert.equal(parsed.calls[0]?.name, 'run_command')
+  assert.equal(parsed.calls[0]?.arguments.command, 'npx --yes create-vite@latest . --template react --overwrite')
+  assert.equal(parsed.visible.includes('DSML'), false)
+  assert.equal(parsed.visible.includes('Запускаю официальный генератор'), true)
+  const listed = parseModelOutput(`<｜DSML｜invoke name="list_dir">
+<｜DSML｜parameter name="path" string="true">.</｜DSML｜parameter>
+</｜DSML｜invoke>`)
+  assert.equal(listed.calls[0]?.name, 'list_dir')
+  assert.equal(listed.calls[0]?.arguments.path, '.')
+  assert.equal(missingToolArgument({ name: 'ask_user', arguments: {} }), 'ask_user: нужен arguments.question, например {"question":"Vite или Vue?"}.')
 })
 
 test('a filesystem refusal is sent back to the tools', () => {
@@ -66,5 +98,7 @@ test('the app stays closed until a model is selected', () => {
   assert.equal(saved.openai.baseUrl, 'https://api.openai.com/v1')
   assert.equal(saved.openai.apiKey, 'sk')
   assert.equal(saved.openai.model, 'gpt-4.1')
+  assert.equal(saved.generation.temperature, 0.2)
+  assert.equal(saved.generation.maxTokens, 2048)
   assert.equal(modelProblem(saved), null)
 })

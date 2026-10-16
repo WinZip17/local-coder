@@ -1,4 +1,4 @@
-import { ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici'
+import { Agent, ProxyAgent, fetch as undiciFetch, type Dispatcher } from 'undici'
 import { socksDispatcher } from 'fetch-socks'
 import type { Settings } from '../shared/types'
 
@@ -9,6 +9,21 @@ function isLocalHost(url: string): boolean {
   } catch {
     return false
   }
+}
+
+const direct = new Agent({
+  allowH2: false,
+  connectTimeout: 30_000,
+  headersTimeout: 180_000,
+  bodyTimeout: 600_000
+})
+
+export function describeNetworkError(error: unknown): Error {
+  if (!(error instanceof Error)) return new Error(String(error))
+  const cause = error.cause
+  if (!(cause instanceof Error) || !cause.message || error.message.includes(cause.message)) return error
+  const code = 'code' in cause && typeof cause.code === 'string' ? `${cause.code}: ` : ''
+  return new Error(`${error.message}: ${code}${cause.message}`)
 }
 
 export function dispatcherFor(url: string, settings: Settings): Dispatcher | undefined {
@@ -33,14 +48,18 @@ export async function appFetch(url: string, settings: Settings, init: {
   body?: string
   signal?: AbortSignal
 } = {}): Promise<Response> {
-  const dispatcher = dispatcherFor(url, settings)
-  return undiciFetch(url, {
-    method: init.method,
-    headers: init.headers,
-    body: init.body,
-    signal: init.signal,
-    dispatcher
-  }) as unknown as Promise<Response>
+  const dispatcher = dispatcherFor(url, settings) ?? direct
+  try {
+    return await undiciFetch(url, {
+      method: init.method,
+      headers: init.headers,
+      body: init.body,
+      signal: init.signal,
+      dispatcher
+    }) as unknown as Promise<Response>
+  } catch (error) {
+    throw describeNetworkError(error)
+  }
 }
 
 export async function readError(response: Response): Promise<string> {

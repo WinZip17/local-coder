@@ -5,11 +5,39 @@ export interface SnippetEdit {
 }
 
 const sourcePath = /(?<![A-Za-z0-9_./-])((?:[A-Za-z0-9_.@-]+[\\/])+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]+)(?![A-Za-z0-9_./-])/g
+const bareFile = /(?<![A-Za-z0-9_./-])([A-Za-z][\w.@-]*\.(?:md|markdown|txt|json|html|css|scss|ts|tsx|js|jsx|vue|svg|mjs|cjs))(?![A-Za-z0-9_./-])/gi
 
 function lastPath(text: string): string {
+  sourcePath.lastIndex = 0
+  bareFile.lastIndex = 0
   let found = ''
-  for (const match of text.matchAll(sourcePath)) found = match[1] ?? found
-  return found.replace(/\\/g, '/')
+  let at = -1
+  for (const match of text.matchAll(sourcePath)) {
+    if (match.index !== undefined && match.index >= at && match[1]) {
+      found = match[1].replace(/\\/g, '/')
+      at = match.index
+    }
+  }
+  for (const match of text.matchAll(bareFile)) {
+    if (match.index !== undefined && match.index >= at && match[1]) {
+      found = match[1].replace(/\\/g, '/')
+      at = match.index
+    }
+  }
+  return found
+}
+
+function namedFiles(text: string): string[] {
+  sourcePath.lastIndex = 0
+  bareFile.lastIndex = 0
+  const found: string[] = []
+  const add = (value: string) => {
+    const path = value.replace(/\\/g, '/')
+    if (!found.includes(path)) found.push(path)
+  }
+  for (const match of text.matchAll(sourcePath)) if (match[1]) add(match[1])
+  for (const match of text.matchAll(bareFile)) if (match[1]) add(match[1])
+  return found
 }
 
 function escapeRegExp(value: string): string {
@@ -69,6 +97,20 @@ function pathComment(snippet: string): { path: string; body: string } {
   }
 }
 
+export function componentSnippet(visible: string): string | null {
+  const fence = /```([^\n`]*)\n([\s\S]*?)```/g
+  let match: RegExpExecArray | null
+  while ((match = fence.exec(visible))) {
+    const header = (match[1] ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+    if (header && !/^(?:tsx|jsx|vue|typescript|ts|javascript|js|react)?$/.test(header)) continue
+    const body = (match[2] ?? '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
+    if (body.split('\n').length < 6) continue
+    if (!/function\s+App\b/.test(body) || !/return\s*\(?/.test(body)) continue
+    return body.endsWith('\n') ? body : `${body}\n`
+  }
+  return null
+}
+
 function inferredPath(header: string, body: string): string {
   const lang = header.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
   if ((lang === 'json' || body.trim().startsWith('{')) && /"name"\s*:/.test(body) && /"(?:dependencies|devDependencies|scripts)"\s*:/.test(body)) return 'package.json'
@@ -76,7 +118,7 @@ function inferredPath(header: string, body: string): string {
   return ''
 }
 
-export function describedSnippets(visible: string): Array<{ path: string; snippet: string }> {
+export function describedSnippets(visible: string, userText = ''): Array<{ path: string; snippet: string }> {
   const items: Array<{ path: string; snippet: string }> = []
   const fence = /```([^\n`]*)\n([\s\S]*?)```/g
   let match: RegExpExecArray | null
@@ -93,11 +135,34 @@ export function describedSnippets(visible: string): Array<{ path: string; snippe
     const commented = pathComment(raw)
     const path = commented.path || lastPath(header) || inferredPath(header, commented.body) || lastPath(before)
     const snippet = commented.path ? commented.body : raw
-    if (!path || snippet.trim().length < 8) continue
-    if (items.some((item) => item.path === path)) continue
+    if (snippet.trim().length < 8) continue
     items.push({ path, snippet })
   }
-  return items
+  const unnamed = items.filter((item) => !item.path)
+  const named = namedFiles(userText)
+  if (named.length === 1 && unnamed.length) {
+    const target = [...unnamed].sort((left, right) => right.snippet.length - left.snippet.length)[0]
+    if (target) target.path = named[0] ?? ''
+  }
+  const ready = items.filter((item) => item.path)
+  const unique: Array<{ path: string; snippet: string }> = []
+  for (const item of ready) {
+    if (unique.some((other) => other.path === item.path)) continue
+    unique.push(item)
+  }
+  return unique
+}
+
+export function replacementContent(userText: string, path: string, snippet: string, fileText: string): string | null {
+  const name = path.split('/').pop() ?? path
+  if (!new RegExp(escapeRegExp(name), 'i').test(userText)) return null
+  if (!/обнов|перепиш|замен|измен|запиш|содержим/i.test(userText)) return null
+  const lines = snippet.split('\n').filter((line) => line.trim()).length
+  const markdown = /\.md$/i.test(path) && /^\s*#\s+\S/m.test(snippet) && snippet.trim().length >= 40
+  if (lines < 6 && !markdown) return null
+  const next = snippet.endsWith('\n') ? snippet : `${snippet}\n`
+  if (fileText.replace(/\r\n/g, '\n').trim() === next.trim()) return null
+  return next
 }
 
 function splitLines(text: string): { lines: string[]; newline: string } {

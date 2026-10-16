@@ -60,10 +60,10 @@ export function useSettingsForm(settings: Settings): SettingsFormApi {
   }
 
   async function loadApi() {
-    const saved = await persist(false)
-    if (!saved) return
     setBusy(true)
-    const listed = await window.localCoder.listApiModels()
+    setError('')
+    setInfo('')
+    const listed = await window.localCoder.listApiModels(draft.openai.baseUrl, draft.openai.apiKey)
     setBusy(false)
     if (!listed.ok) {
       setError(listed.error)

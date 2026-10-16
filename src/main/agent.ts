@@ -1,8 +1,11 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { describedLineEdit, describedSnippets, snippetToEdit } from '../shared/edits'
+import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, dependenciesInstalled, generatorSucceeded, isDevServerCommand, isDirectoryChange, isInstallCommand, isProjectCreationRequest, isProjectInstall, normalizeCommand, scaffoldInCurrentFolder, shouldAskCreationChoice } from '../shared/creation'
+import { declaresFinished, impliedToolCall, pendingEditPath, statesPendingWork, toolAfterSilence } from '../shared/intent'
+import { hoistScaffold } from './hoistScaffold'
+import { componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from '../shared/edits'
 import type { ToolCall } from '../shared/parse'
-import { parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
+import { missingToolArgument, parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
 import { resolveInsideProject } from '../shared/safety'
 import { modelProblem } from '../shared/settings'
 import type { AgentEvent, ChatMessage, PendingRequest } from '../shared/types'
@@ -54,6 +57,105 @@ function lastUserText(chatId: string): string {
     if (messages[index]?.role === 'user') return messages[index]?.content ?? ''
   }
   return ''
+}
+
+function lastToolText(chatId: string): string {
+  const messages = requireChat(chatId).messages
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === 'tool') return messages[index]?.content ?? ''
+  }
+  return ''
+}
+
+function installIsBroken(chatId: string): boolean {
+  let broken = false
+  for (const message of requireChat(chatId).messages) {
+    if (message.role !== 'tool' || !isInstallCommand(message.content)) continue
+    broken = commandFailed(message.content)
+  }
+  return broken
+}
+
+function projectWasGenerated(chatId: string): boolean {
+  return requireChat(chatId).messages.some((message) => message.role === 'tool' && generatorSucceeded(message.content))
+}
+
+function lastReadPage(chatId: string): string {
+  const messages = requireChat(chatId).messages
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role !== 'tool') continue
+    const match = message.content.match(/(?:^|\n\n)read_file\s+([^\s:]+)/)
+    const file = match?.[1]?.replace(/\\/g, '/') ?? ''
+    if (/(?:^|\/)(?:App|page)\.(?:tsx|jsx)$/i.test(file) || /(?:^|\/)app\.vue$/i.test(file)) return file
+  }
+  return ''
+}
+
+function pageWrittenSinceScaffold(chatId: string, filePath: string): boolean {
+  const messages = requireChat(chatId).messages
+  let generatedAt = -1
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    if (message?.role === 'tool' && generatorSucceeded(message.content)) generatedAt = index
+  }
+  if (generatedAt < 0 || !filePath) return false
+  const escaped = filePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const pattern = new RegExp(`(?:^|\\n\\n)(?:write_file|edit_file) ${escaped}(?::|\\s)`, 'i')
+  return messages.slice(generatedAt + 1).some((message) => message.role === 'tool' && pattern.test(message.content) && /записано|заменено/i.test(message.content))
+}
+
+function filesWereEdited(chatId: string): boolean {
+  return requireChat(chatId).messages.some((message) => message.role === 'tool' && /(?:^|\n\n)(?:write_file|edit_file) \S[^\n]*(?:записано|заменено)/i.test(message.content))
+}
+
+function successfulCommands(chatId: string): string[] {
+  return requireChat(chatId).messages.filter((message) => message.role === 'tool').map((message) => message.content)
+}
+
+function userAskedToRepeat(chatId: string): boolean {
+  return /ещё раз|еще раз|повтор(?:и|ите|ить)|заново|снова запусти|запусти снова|перезапусти/i.test(lastUserText(chatId))
+}
+
+function projectInstallCommand(chatId: string): string {
+  for (let index = requireChat(chatId).messages.length - 1; index >= 0; index -= 1) {
+    const message = requireChat(chatId).messages[index]
+    if (!message || message.role !== 'tool' || !generatorSucceeded(message.content)) continue
+    const command = message.content.match(/(?:^|\n\n)run_command ([^\n]+)/)?.[1] ?? ''
+    if (/^pnpm\b/i.test(command)) return 'pnpm install'
+    if (/^yarn\b/i.test(command)) return 'yarn install'
+    if (/^bun\b/i.test(command)) return 'bun install'
+    return 'npm install'
+  }
+  return 'npm install'
+}
+
+function chatCreatesProject(chatId: string): boolean {
+  return requireChat(chatId).messages.some((message) => message.role === 'user' && isProjectCreationRequest(message.content))
+}
+
+function lastCreationChoice(chatId: string): { question: string; answer: string } | null {
+  for (let index = requireChat(chatId).messages.length - 1; index >= 0; index -= 1) {
+    const message = requireChat(chatId).messages[index]
+    if (!message || message.role !== 'tool' || !message.content.startsWith('ask_user') || !/Ответ пользователя:/.test(message.content)) continue
+    const question = message.content.match(/Вопрос:\s*([\s\S]*?)\nОтвет пользователя:/)?.[1]?.trim() ?? ''
+    const answer = message.content.match(/Ответ пользователя:\s*([\s\S]*)$/)?.[1]?.trim() ?? ''
+    if (question && answer) return { question, answer }
+  }
+  return null
+}
+
+function creationChoiceAnswered(chatId: string): boolean {
+  return requireChat(chatId).messages.some((message) => message.role === 'tool' && message.content.startsWith('ask_user') && /Ответ пользователя:/.test(message.content))
+}
+
+function creationAllowsFiles(chatId: string): boolean {
+  if (!isProjectCreationRequest(lastUserText(chatId))) return true
+  return requireChat(chatId).messages.some((message) => {
+    if (message.role !== 'tool') return false
+    if (message.content.startsWith('ask_user') && /Ответ пользователя:/.test(message.content)) return true
+    return /create-|nuxi|npm create|pnpm create|yarn create/i.test(message.content) && /Процесс завершился с кодом 0/.test(message.content)
+  })
 }
 
 function nudgeText(visible: string): string {
@@ -140,9 +242,9 @@ async function sourceFiles(root: string): Promise<Array<{ path: string; text: st
   return files
 }
 
-async function editsFromAnswer(projectPath: string, visible: string, userText: string): Promise<ToolCall[]> {
+async function editsFromAnswer(projectPath: string, visible: string, userText: string, pagePath = ''): Promise<ToolCall[]> {
   const calls: ToolCall[] = []
-  for (const item of describedSnippets(visible)) {
+  for (const item of describedSnippets(visible, userText)) {
     let target = ''
     try {
       target = resolveInsideProject(projectPath, item.path)
@@ -159,8 +261,21 @@ async function editsFromAnswer(projectPath: string, visible: string, userText: s
       })
       continue
     }
+    const replaced = replacementContent(userText, item.path, item.snippet, fileText)
+    if (replaced) {
+      calls.push({ name: 'write_file', arguments: { path: item.path, content: replaced } })
+      continue
+    }
     const edit = snippetToEdit(fileText, item.snippet)
-    if (!edit) continue
+    if (!edit) {
+      if (isProjectCreationRequest(userText) && /export default/.test(item.snippet) && item.snippet.split('\n').length >= 8) {
+        calls.push({
+          name: 'write_file',
+          arguments: { path: item.path, content: item.snippet.endsWith('\n') ? item.snippet : `${item.snippet}\n` }
+        })
+      }
+      continue
+    }
     calls.push({
       name: 'edit_file',
       arguments: { path: item.path, oldText: edit.oldText, newText: edit.newText }
@@ -170,10 +285,26 @@ async function editsFromAnswer(projectPath: string, visible: string, userText: s
     const line = describedLineEdit(await sourceFiles(projectPath), userText, visible)
     if (line) calls.push({ name: 'edit_file', arguments: { path: line.path, oldText: line.oldText, newText: line.newText } })
   }
+  if (pagePath && !calls.some((call) => call.arguments.path === pagePath)) {
+    const body = componentSnippet(visible)
+    if (body) {
+      let current = ''
+      try {
+        current = await readFile(resolveInsideProject(projectPath, pagePath), 'utf8')
+      } catch {
+        current = ''
+      }
+      if (current.replace(/\r\n/g, '\n').trim() !== body.trim()) {
+        calls.push({ name: 'write_file', arguments: { path: pagePath, content: body } })
+      }
+    }
+  }
   return calls
 }
 
 async function runTool(chatId: string, projectPath: string, call: ToolCall, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<string> {
+  const missing = missingToolArgument(call)
+  if (missing) return missing
   if (call.name === 'ask_user') {
     const question = typeof call.arguments.question === 'string' ? call.arguments.question.trim() : ''
     if (!question) return 'ask_user: пустой вопрос.'
@@ -242,16 +373,26 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
   let map = await ensureProjectMap(projectPath)
   let edited = false
   let nudges = 0
+  let failureNudges = 0
+  let emptyToolSteps = 0
+  let adjustNudges = 0
+  let intentNudges = 0
+  let emptyAnswers = 0
+  let stepLimit = chatCreatesProject(chatId) ? 12 : MAX_STEPS
+  const hardLimit = stepLimit + 4
+  let cutoff = true
+  const doneCommands = new Set<string>()
 
-  for (let step = 1; step <= MAX_STEPS; step += 1) {
+  for (let step = 1; step <= hardLimit; step += 1) {
     if (signal.aborted) throw new DOMException('Остановлено', 'AbortError')
-    emit({ type: 'status', chatId, text: `Шаг ${step} из ${MAX_STEPS}` })
+    emit({ type: 'status', chatId, text: `Шаг ${step} из ${stepLimit}` })
     const settings = getSettings()
     const problem = modelProblem(settings)
     if (problem) throw new Error(problem)
     const contextSize = settings.activeProvider === 'local' ? settings.local.contextSize : 8192
     let streamed = ''
     let output = ''
+    let emptyAnswer = false
     try {
       output = await completeChat({
         settings,
@@ -265,21 +406,25 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (step < MAX_STEPS && /пустой ответ/.test(message)) {
-        emit({ type: 'flush', chatId })
-        const reminder = makeMessage('tool', 'Ответ пустой. Прочитай файл с offset 1 и вызови edit_file с точным фрагментом.', 'tool')
-        await addMessage(chatId, reminder)
-        emit({ type: 'message', chatId, message: reminder })
-        continue
-      }
-      throw error
+      if (!/пустой ответ/.test(message)) throw error
+      emit({ type: 'flush', chatId })
+      emptyAnswer = true
+      output = ''
     }
     emit({ type: 'flush', chatId })
     const parsed = parseModelOutput(output || streamed)
-    if (parsed.visible && sameText(parsed.visible, previousAssistant(chatId))) return
+    const creating = chatCreatesProject(chatId)
+    if (creating && !parsed.calls.length && !parsed.errors.length && !projectWasGenerated(chatId)) {
+      const choice = lastCreationChoice(chatId)
+      const command = choice ? commandFromCreationAnswer(choice.question, choice.answer) : null
+      if (command) parsed.calls.push({ name: 'run_command', arguments: { command } })
+    }
+    if (parsed.visible && sameText(parsed.visible, previousAssistant(chatId)) && !parsed.calls.length) return
     const alreadyWrites = parsed.calls.some((call) => call.name === 'edit_file' || call.name === 'write_file')
-    if (!edited && !alreadyWrites && parsed.visible) {
-      parsed.calls.push(...await editsFromAnswer(projectPath, parsed.visible, lastUserText(chatId)))
+    if (!edited && !alreadyWrites && parsed.visible && creationAllowsFiles(chatId)) {
+      const candidate = creating && projectWasGenerated(chatId) ? lastReadPage(chatId) : ''
+      const pagePath = candidate && !pageWrittenSinceScaffold(chatId, candidate) ? candidate : ''
+      parsed.calls.push(...await editsFromAnswer(projectPath, parsed.visible, lastUserText(chatId), pagePath))
     }
     if (parsed.visible) {
       const message = makeMessage('assistant', parsed.visible, 'text')
@@ -287,25 +432,150 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       emit({ type: 'message', chatId, message })
     }
     if (!parsed.calls.length && !parsed.errors.length) {
-      if (!edited && step < MAX_STEPS && shouldNudgeFileEdit(parsed.visible, lastUserText(chatId), nudges)) {
+      const implied = impliedToolCall(parsed.visible)
+      const previous = lastToolText(chatId)
+      const listed = previous.match(/^list_dir\s+(\S+)/)
+      const repeated = implied?.name === 'list_dir' && listed?.[1] === implied.arguments.path
+      if (implied && !repeated) parsed.calls.push(implied)
+    }
+    if (emptyAnswer && !parsed.calls.length && !parsed.errors.length) {
+      const previous = lastToolText(chatId)
+      const silent = toolAfterSilence(previous)
+      const listed = previous.match(/^list_dir\s+(\S+)/)
+      const repeated = silent?.name === 'list_dir' && listed?.[1] === silent.arguments.path
+      if (silent && !repeated) parsed.calls.push(silent)
+      else if (creating && projectWasGenerated(chatId) && !edited && !listed && !previous.startsWith('read_file')) {
+        parsed.calls.push({ name: 'list_dir', arguments: { path: '.' } })
+      }
+    }
+    if (creating && !parsed.calls.length && !parsed.errors.length && parsed.visible && shouldAskCreationChoice(parsed.visible) && !creationChoiceAnswered(chatId)) {
+      parsed.calls.push({ name: 'ask_user', arguments: { question: parsed.visible } })
+    }
+    if (!parsed.calls.length && !parsed.errors.length) {
+      if (step < stepLimit && failureNudges < 3 && commandFailed(lastToolText(chatId))) {
+        failureNudges += 1
+        const missingPackages = /ERR_MODULE_NOT_FOUND|Cannot find package|Cannot find module|зациклил/i.test(lastToolText(chatId))
+        const reminder = makeMessage('tool', missingPackages
+          ? 'Пакеты проекта не установлены. Вызови run_command только с npm install и дождись кода 0. Не запускай npm run dev, не ставь пакеты по одному и не меняй vite.config.'
+          : 'Команда завершилась с ошибкой. Исправь причину в файлах или другой командой и запусти её снова. Не заканчивай задачу пересказом ошибки.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (creating && projectWasGenerated(chatId) && !edited && !filesWereEdited(chatId) && step < stepLimit && adjustNudges < 2) {
+        adjustNudges += 1
+        const reminder = makeMessage('tool', 'Шаблон генератора ещё не изменён. Пересказ правок файл не меняет. Вызови list_dir, найди главный файл страницы и вызови write_file по этому пути, например src/App.tsx или src/App.jsx. Передай полный новый текст: только то, что просил пользователь. Демо-блоки шаблона удали. Не придумывай путь с именем папки проекта.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (intentNudges < 4 && statesPendingWork(parsed.visible)) {
+        intentNudges += 1
+        if (step >= stepLimit && stepLimit < hardLimit) stepLimit += 1
+        const editPath = pendingEditPath(parsed.visible) ?? ( /замен|перепиш|измен|обновл|впишу|запиш|write_file|edit_file/i.test(parsed.visible) ? lastToolText(chatId).match(/^read_file\s+(\S+)/)?.[1] ?? '' : '')
+        const text = editPath
+          ? `Замена без записи файл не меняет. Сразу вызови write_file для ${editPath} и передай в content полный новый текст файла. Не описывай замену словами.`
+          : 'Описание следующего шага ничего не выполняет. Сразу вызови нужный инструмент в этом ответе: list_dir, read_file, write_file, edit_file или run_command. Не пиши, что сделаешь это потом.'
+        const reminder = makeMessage('tool', text, 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (emptyAnswer && emptyAnswers < 2) {
+        emptyAnswers += 1
+        const previous = lastToolText(chatId)
+        const text = /за концом/.test(previous)
+          ? 'Ответ пустой. Прочитай файл с offset 1 и вызови edit_file с точным фрагментом.'
+          : /^read_file /.test(previous)
+            ? 'Ответ пустой. Файл уже прочитан. Вызови write_file и передай полный новый текст.'
+            : 'Ответ пустой. Продолжи задачу вызовом инструмента.'
+        const reminder = makeMessage('tool', text, 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (emptyAnswer) {
+        const stop = makeMessage('assistant', 'Модель повторно вернула пустой ответ. Файлы на этом шаге не изменены. Напишите «продолжи».', 'text')
+        await addMessage(chatId, stop)
+        emit({ type: 'message', chatId, message: stop })
+        return
+      }
+      if (!creating && !edited && step < stepLimit && shouldNudgeFileEdit(parsed.visible, lastUserText(chatId), nudges)) {
         nudges += 1
         const reminder = makeMessage('tool', nudgeText(parsed.visible), 'tool')
         await addMessage(chatId, reminder)
         emit({ type: 'message', chatId, message: reminder })
         continue
       }
-      return
+      cutoff = statesPendingWork(parsed.visible)
+      break
     }
 
+    if (creating && !projectWasGenerated(chatId)) {
+      const choice = lastCreationChoice(chatId)
+      const chosen = choice ? commandFromCreationAnswer(choice.question, choice.answer) : null
+      if (chosen) {
+        let filled = false
+        parsed.calls = parsed.calls.filter((call) => {
+          if (call.name !== 'run_command' || String(call.arguments.command ?? '').trim()) return true
+          if (filled) return false
+          call.arguments = { ...call.arguments, command: chosen }
+          filled = true
+          return true
+        })
+      }
+    }
     const results: string[] = []
     if (parsed.errors.length) results.push(parsed.errors.join('\n'))
+    const incomplete = parsed.calls.length > 0 && parsed.calls.every((call) => missingToolArgument(call))
+    emptyToolSteps = incomplete ? emptyToolSteps + 1 : 0
+    let installBroken = installIsBroken(chatId)
     let stopForQuestion = false
+    let ranNewCommand = false
     for (const call of parsed.calls) {
       if (stopForQuestion) {
         results.push(`${call.name}: пропущен, сначала нужно учесть ответ пользователя.`)
         continue
       }
-      const result = await runTool(chatId, projectPath, call, emit, signal)
+      if (call.name === 'run_command') {
+        const original = typeof call.arguments.command === 'string' ? call.arguments.command.trim() : ''
+        if (isDirectoryChange(original)) {
+          results.push('run_command отклонён: папка проекта уже выбрана. cd не переносит следующие команды, работай в текущей папке.')
+          continue
+        }
+        const placed = scaffoldInCurrentFolder(original)
+        if (placed && placed !== original) call.arguments = { ...call.arguments, command: placed }
+        let command = typeof call.arguments.command === 'string' ? call.arguments.command : original
+        const installed = dependenciesInstalled(requireChat(chatId).messages.filter((message) => message.role === 'tool').map((message) => message.content))
+        if (!installed && (isDevServerCommand(command) || (isInstallCommand(command) && !isProjectInstall(command)))) {
+          if (installBroken && isDevServerCommand(command)) {
+            results.push('run_command пропущен: установка зависимостей завершилась с ошибкой. Сначала исправь её, npm run dev не запускай.')
+            continue
+          }
+          command = projectInstallCommand(chatId)
+          call.arguments = { ...call.arguments, command }
+        }
+        if (installBroken && isDevServerCommand(command)) {
+          results.push('run_command пропущен: установка зависимостей завершилась с ошибкой. Сначала исправь её, npm run dev не запускай.')
+          continue
+        }
+        const key = normalizeCommand(command)
+        if (key && !userAskedToRepeat(chatId) && (doneCommands.has(key) || commandAlreadySucceeded(successfulCommands(chatId), key))) {
+          results.push(`run_command ${key}\nЭта команда уже завершилась с кодом 0. Повторно не запускаю.`)
+          continue
+        }
+      }
+      let result = await runTool(chatId, projectPath, call, emit, signal)
+      if (call.name === 'run_command') {
+        const command = typeof call.arguments.command === 'string' ? call.arguments.command : ''
+        ranNewCommand = true
+        if (/Процесс завершился с кодом 0/.test(result) && !commandFailed(result)) doneCommands.add(normalizeCommand(command))
+        if (isInstallCommand(command)) installBroken = commandFailed(result)
+        if (generatorSucceeded(result)) {
+          const lifted = await hoistScaffold(projectPath).catch(() => null)
+          if (lifted) result += `\n${lifted}`
+        }
+      }
       if ((call.name === 'edit_file' || call.name === 'write_file') && !/ошибка/i.test(result)) edited = true
       results.push(result)
       if (call.name === 'ask_user') stopForQuestion = true
@@ -314,11 +584,26 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     const toolMessage = makeMessage('tool', results.join('\n\n'), 'tool')
     await addMessage(chatId, toolMessage)
     emit({ type: 'message', chatId, message: toolMessage })
+    if (emptyToolSteps >= 2) {
+      const saved = !creating || filesWereEdited(chatId) || projectWasGenerated(chatId)
+      const stop = makeMessage('assistant', saved
+        ? 'Модель повторила вызов без аргументов. Сделанные изменения на месте. Напишите «продолжи», если нужно вести задачу дальше.'
+        : 'Модель повторяет вызов инструмента без аргументов. Напишите задачу ещё раз.', 'text')
+      await addMessage(chatId, stop)
+      emit({ type: 'message', chatId, message: stop })
+      return
+    }
+    const failedNow = results.some((result) => commandFailed(result) || /ошибка/i.test(result))
+    if (declaresFinished(parsed.visible) && !statesPendingWork(parsed.visible) && !failedNow) {
+      if (!ranNewCommand) return
+      cutoff = false
+    }
     const onlyFiles = parsed.calls.every((call) => call.name === 'write_file' || call.name === 'edit_file')
     const writeFailed = results.some((result) => /write_file ошибка/i.test(result))
-    if (edited && onlyFiles && parsed.calls.some((call) => call.name === 'write_file') && !writeFailed) return
+    if (!creating && edited && onlyFiles && parsed.calls.some((call) => call.name === 'write_file') && !writeFailed) return
   }
 
+  if (!cutoff) return
   const limit = makeMessage('assistant', 'Достигнут лимит шагов. Напишите «продолжи», если задачу нужно вести дальше.', 'text')
   await addMessage(chatId, limit)
   emit({ type: 'message', chatId, message: limit })

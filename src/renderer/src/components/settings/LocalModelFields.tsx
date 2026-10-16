@@ -1,3 +1,4 @@
+import { defaultSettings } from '../../../../shared/settings'
 import type { GpuMode } from '../../../../shared/types'
 import { useSettingsFormContext } from './formContext'
 
@@ -32,7 +33,7 @@ export function LocalModelFields() {
         </select>
       </label>
       <label>
-        Контекст, токены
+        <span>Контекст, токены <span className="recommend">рекомендуется {defaultSettings.local.contextSize}</span></span>
         <input
           type="number"
           min={512}

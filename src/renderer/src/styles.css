@@ -284,6 +284,7 @@ textarea { min-height: 74px; resize: vertical; }
 .hint, .fine { margin: 0; }
 
 label { display: grid; gap: 4px; color: #d9d1c6; }
+.recommend { color: #b3aa9f; font-weight: 400; }
 .check { grid-template-columns: auto 1fr; align-items: center; }
 
 .choice-row, .grid-2, .grid-3 { display: grid; gap: 8px; }

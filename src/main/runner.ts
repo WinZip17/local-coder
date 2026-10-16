@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { isGitCommand } from '../shared/safety'
+import { outputLooped } from '../shared/creation'
 import type { LogLine, RunnerState } from '../shared/types'
 
 type Emit = (line: LogLine) => void
@@ -105,9 +106,15 @@ export async function runAndCollect(chatId: string, command: string, cwd: string
   return await new Promise((resolve, reject) => {
     const chunks: string[] = []
     let settled = false
+    let looped = false
     const take = (chunk: Buffer) => {
       chunks.push(chunk.toString('utf8'))
-      if (chunks.join('').length > 100_000) chunks.splice(0, chunks.length - 20)
+      const joined = chunks.join('')
+      if (chunks.length > 40 || joined.length > 100_000) chunks.splice(0, chunks.length - 20)
+      if (!looped && outputLooped(joined)) {
+        looped = true
+        stopCommand()
+      }
     }
     const finish = (handler: () => void) => {
       if (settled) return
@@ -121,8 +128,12 @@ export async function runAndCollect(chatId: string, command: string, cwd: string
     signal?.addEventListener('abort', onAbort, { once: true })
     current.on('error', (error) => finish(() => reject(error)))
     current.on('exit', (code) => finish(() => {
-      const output = chunks.join('').slice(-100_000)
-      resolve(output.trim() ? output : `Команда завершилась с кодом ${code ?? 'null'} без вывода.`)
+      if (looped) {
+        resolve('Вывод зациклился, процесс остановлен. Для зависимостей нужна одна команда npm install с кодом 0. npm run dev, установку отдельных пакетов и правку vite.config не повторяй.\nПроцесс завершился с кодом 1.')
+        return
+      }
+      const output = chunks.join('').slice(-12_000).trim()
+      resolve(`${output}${output ? '\n' : ''}Процесс завершился с кодом ${code ?? 'null'}.`)
     }))
   })
 }

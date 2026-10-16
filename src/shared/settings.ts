@@ -1,7 +1,16 @@
 import type { Settings } from './types'
 
+export const recommendedGeneration = {
+  temperature: 0.2,
+  maxTokens: 2048
+}
+
 export const defaultSettings: Settings = {
   activeProvider: null,
+  generation: {
+    temperature: recommendedGeneration.temperature,
+    maxTokens: recommendedGeneration.maxTokens
+  },
   local: {
     modelPath: '',
     gpu: 'auto',
@@ -36,13 +45,20 @@ export function normalizeSettings(input: unknown): Settings {
   const ollama = source.ollama ?? defaultSettings.ollama
   const openai = source.openai ?? defaultSettings.openai
   const proxy = source.proxy ?? defaultSettings.proxy
+  const generation = source.generation ?? defaultSettings.generation
   const provider = source.activeProvider
+  const temperature = Number(generation.temperature)
+  const maxTokens = Number(generation.maxTokens)
   const gpu = local.gpu
   const protocol = proxy.protocol
   const contextSize = Number(local.contextSize)
 
   return {
     activeProvider: provider === 'local' || provider === 'ollama' || provider === 'openai' ? provider : null,
+    generation: {
+      temperature: Number.isFinite(temperature) ? Math.round(temperature * 100) / 100 : defaultSettings.generation.temperature,
+      maxTokens: Number.isFinite(maxTokens) ? Math.round(maxTokens) : defaultSettings.generation.maxTokens
+    },
     local: {
       modelPath: asText(local.modelPath),
       gpu: gpu === 'cuda' || gpu === 'vulkan' || gpu === 'cpu' || gpu === 'auto' ? gpu : 'auto',
@@ -99,6 +115,11 @@ export function modelProblem(settings: Settings): string | null {
       return 'Адрес API некорректный.'
     }
     if (!settings.openai.model) return 'Укажите имя модели API.'
+  }
+
+  if (settings.generation.temperature < 0 || settings.generation.temperature > 2) return 'Температура должна быть от 0 до 2.'
+  if (settings.generation.maxTokens < 64 || settings.generation.maxTokens > 128000) {
+    return 'Максимум токенов ответа должен быть от 64 до 128000.'
   }
 
   if (settings.proxy.enabled) {

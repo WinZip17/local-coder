@@ -227,8 +227,8 @@ export async function completeLocal(options: {
       options.onStatus?.('Модель отвечает…')
       try {
         return await session.prompt(prompt, {
-          temperature: 0.2,
-          maxTokens: Math.min(2048, Math.max(256, Math.floor(options.settings.local.contextSize / 4))),
+          temperature: options.settings.generation.temperature,
+          maxTokens: Math.min(options.settings.generation.maxTokens, Math.max(64, options.settings.local.contextSize - 256)),
           signal: options.signal,
           onTextChunk: options.onToken
         })

@@ -43,7 +43,17 @@ export async function registerIpc(getWindow: () => BrowserWindow | null): Promis
   ipcMain.handle('settings:get', () => guard(() => getSettings()))
   ipcMain.handle('settings:save', (_event, input: unknown) => guard(() => saveSettings(input)))
   ipcMain.handle('ollama:list', (_event, baseUrl: string) => guard(() => listOllamaModels(baseUrl, getSettings())))
-  ipcMain.handle('api:list', () => guard(() => listApiModels(getSettings())))
+  ipcMain.handle('api:list', (_event, baseUrl: unknown, apiKey: unknown) => guard(() => {
+    const settings = getSettings()
+    return listApiModels({
+      ...settings,
+      openai: {
+        ...settings.openai,
+        baseUrl: typeof baseUrl === 'string' ? baseUrl : settings.openai.baseUrl,
+        apiKey: typeof apiKey === 'string' ? apiKey : settings.openai.apiKey
+      }
+    })
+  }))
   ipcMain.handle('dialog:gguf', () => guard(async () => {
     const result = await dialog.showOpenDialog({
       title: 'Файл модели GGUF',

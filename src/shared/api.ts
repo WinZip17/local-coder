@@ -4,7 +4,7 @@ export interface LocalCoderApi {
   getSettings(): Promise<Result<Settings>>
   saveSettings(settings: Settings): Promise<Result<Settings>>
   listOllamaModels(baseUrl: string): Promise<Result<string[]>>
-  listApiModels(): Promise<Result<string[]>>
+  listApiModels(baseUrl: string, apiKey: string): Promise<Result<string[]>>
   pickGguf(): Promise<Result<string | null>>
   probeLocal(): Promise<Result<ProbeResult>>
   listChats(): Promise<Result<ChatSummary[]>>

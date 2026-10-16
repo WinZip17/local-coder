@@ -1,5 +1,6 @@
 import type { ProviderId } from '../../../../shared/types'
 import { ApiFields } from './ApiFields'
+import { GenerationFields } from './GenerationFields'
 import { LocalModelFields } from './LocalModelFields'
 import { OllamaFields } from './OllamaFields'
 import { useSettingsFormContext } from './formContext'
@@ -31,6 +32,7 @@ export function ModelTab() {
       {draft.activeProvider === 'local' && <LocalModelFields />}
       {draft.activeProvider === 'ollama' && <OllamaFields />}
       {draft.activeProvider === 'openai' && <ApiFields />}
+      <GenerationFields />
     </>
   )
 }
