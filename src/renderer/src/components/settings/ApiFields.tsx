@@ -27,15 +27,26 @@ export function ApiFields() {
       <label>
         Имя модели
         <input
-          list="api-models"
           value={draft.openai.model}
           spellCheck={false}
           onChange={(event) => patch({ ...draft, openai: { ...draft.openai, model: event.target.value } })}
         />
-        <datalist id="api-models">
-          {apiModels.map((model) => <option key={model} value={model} />)}
-        </datalist>
       </label>
+      {apiModels.length > 0 && (
+        <ul className="model-list" aria-label="Модели API">
+          {apiModels.map((model) => (
+            <li key={model}>
+              <button
+                type="button"
+                className={model === draft.openai.model ? 'active' : undefined}
+                onClick={() => patch({ ...draft, openai: { ...draft.openai, model } })}
+              >
+                {model}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <button type="button" disabled={busy} onClick={() => void loadApi()}>Загрузить список моделей</button>
     </section>
   )

@@ -1,4 +1,5 @@
 import { app, BrowserWindow, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { registerIpc } from './ipc'
 import { disposeLocal } from './localModel'
@@ -6,7 +7,16 @@ import { stopCommand } from './runner'
 
 let mainWindow: BrowserWindow | null = null
 
+function windowIcon(): string | undefined {
+  const candidates = [
+    join(process.cwd(), 'resources', 'icon.png'),
+    join(app.getAppPath(), 'resources', 'icon.png')
+  ]
+  return candidates.find((candidate) => existsSync(candidate))
+}
+
 function createWindow(): BrowserWindow {
+  const icon = windowIcon()
   const window = new BrowserWindow({
     width: 1280,
     height: 840,
@@ -15,6 +25,7 @@ function createWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#14161c',
     title: 'Local Coder',
+    ...(icon ? { icon } : {}),
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

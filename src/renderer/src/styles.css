@@ -103,6 +103,9 @@ textarea { min-height: 74px; resize: vertical; }
   pointer-events: none;
 }
 
+.shell.sidebar-collapsed .workspace { padding-left: 52px; }
+.shell.console-collapsed .workspace { padding-bottom: 48px; }
+
 .brand-row {
   display: flex;
   align-items: flex-start;
@@ -111,6 +114,8 @@ textarea { min-height: 74px; resize: vertical; }
 }
 
 .brand { display: grid; gap: 2px; }
+.brand strong { display: flex; align-items: center; gap: 8px; }
+.brand-mark { width: 28px; height: 28px; border-radius: 8px; }
 .brand span, .fine, .hint, .topbar p, .status { color: #b3aa9f; }
 
 .chat-list { overflow: auto; display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
@@ -188,8 +193,22 @@ textarea { min-height: 74px; resize: vertical; }
 
 .thread { flex: 1; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
 
-.bubble {
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: fit-content;
   max-width: min(760px, 92%);
+  align-items: flex-start;
+}
+
+.message.user { align-self: flex-end; align-items: flex-end; }
+.message.tool { width: 100%; max-width: 100%; }
+
+.message time { color: #8f877c; font-size: 12px; }
+
+.bubble {
+  max-width: 100%;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   padding: 10px 12px;
@@ -197,9 +216,21 @@ textarea { min-height: 74px; resize: vertical; }
   background: #232833;
 }
 
-.bubble.user { align-self: flex-end; background: #3a3328; }
-.bubble.tool { max-width: 100%; color: #d9d0c4; background: #1a1e18; border-left: 3px solid #e2a04a; }
+.bubble.user { background: #3a3328; }
+.bubble.tool { color: #d9d0c4; background: #1a1e18; border-left: 3px solid #e2a04a; }
 .bubble.error { border-left-color: #e08b7d; background: #2a1d1c; }
+
+.spoiler-toggle {
+  display: block;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  color: #e2a04a;
+  text-align: left;
+}
+
+.spoiler-body { margin-top: 8px; }
 
 .composer, .command { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: end; }
 
@@ -307,6 +338,27 @@ label { display: grid; gap: 4px; color: #d9d1c6; }
 .tab { background: transparent; border-color: #3c4250; }
 .tab.active { border-color: #e2a04a; background: #2c261d; }
 .choice input { width: auto; }
+
+.model-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #3c4250;
+  border-radius: 8px;
+  background: #12141a;
+}
+
+.model-list button {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+}
+
+.model-list button.active,
+.model-list button:hover { background: #2c261d; }
 
 .empty { color: #b3aa9f; }
 

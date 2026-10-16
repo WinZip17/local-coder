@@ -13,7 +13,7 @@ export function Sidebar() {
       <div className="sidebar-slide">
         <div className="brand-row">
           <div className="brand">
-            <strong>Local Coder</strong>
+            <strong><img className="brand-mark" src="./icon.png" alt="" />Local Coder</strong>
             <span>один чат — один проект</span>
           </div>
           <button
