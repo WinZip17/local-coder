@@ -58,6 +58,24 @@ export function describedLineEdit(files: Array<{ path: string; text: string }>, 
   return null
 }
 
+function pathComment(snippet: string): { path: string; body: string } {
+  const lines = snippet.split('\n')
+  const first = lines[0]?.trim() ?? ''
+  const comment = first.match(/^(?:\/\/|\/\*|#)\s*((?:[\w.@*-]+[\\/])*[\w.@*-]+\.[A-Za-z0-9]+)\s*(?:\*\/)?$/)
+  if (!comment?.[1]) return { path: '', body: snippet }
+  return {
+    path: comment[1].replace(/\\/g, '/'),
+    body: lines.slice(1).join('\n').replace(/^\n+|\n+$/g, '')
+  }
+}
+
+function inferredPath(header: string, body: string): string {
+  const lang = header.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  if ((lang === 'json' || body.trim().startsWith('{')) && /"name"\s*:/.test(body) && /"(?:dependencies|devDependencies|scripts)"\s*:/.test(body)) return 'package.json'
+  if (/^\s*<!doctype html/i.test(body) || /<html[\s>]/i.test(body)) return 'index.html'
+  return ''
+}
+
 export function describedSnippets(visible: string): Array<{ path: string; snippet: string }> {
   const items: Array<{ path: string; snippet: string }> = []
   const fence = /```([^\n`]*)\n([\s\S]*?)```/g
@@ -69,11 +87,14 @@ export function describedSnippets(visible: string): Array<{ path: string; snippe
       cursor = match.index + match[0].length
       continue
     }
-    const before = visible.slice(cursor, match.index)
-    const snippet = (match[2] ?? '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
+    const before = visible.slice(Math.max(cursor, match.index - 200), match.index)
+    const raw = (match[2] ?? '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
     cursor = match.index + match[0].length
-    const path = lastPath(header) || lastPath(before) || lastPath(visible.slice(0, match.index))
+    const commented = pathComment(raw)
+    const path = commented.path || lastPath(header) || inferredPath(header, commented.body) || lastPath(before)
+    const snippet = commented.path ? commented.body : raw
     if (!path || snippet.trim().length < 8) continue
+    if (items.some((item) => item.path === path)) continue
     items.push({ path, snippet })
   }
   return items

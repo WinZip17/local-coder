@@ -153,6 +153,10 @@ async function editsFromAnswer(projectPath: string, visible: string, userText: s
     try {
       fileText = await readFile(target, 'utf8')
     } catch {
+      calls.push({
+        name: 'write_file',
+        arguments: { path: item.path, content: item.snippet.endsWith('\n') ? item.snippet : `${item.snippet}\n` }
+      })
       continue
     }
     const edit = snippetToEdit(fileText, item.snippet)
@@ -310,6 +314,9 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     const toolMessage = makeMessage('tool', results.join('\n\n'), 'tool')
     await addMessage(chatId, toolMessage)
     emit({ type: 'message', chatId, message: toolMessage })
+    const onlyFiles = parsed.calls.every((call) => call.name === 'write_file' || call.name === 'edit_file')
+    const writeFailed = results.some((result) => /write_file ошибка/i.test(result))
+    if (edited && onlyFiles && parsed.calls.some((call) => call.name === 'write_file') && !writeFailed) return
   }
 
   const limit = makeMessage('assistant', 'Достигнут лимит шагов. Напишите «продолжи», если задачу нужно вести дальше.', 'text')

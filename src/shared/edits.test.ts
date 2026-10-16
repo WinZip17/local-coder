@@ -48,6 +48,28 @@ test('a described role deletion removes that enum line', () => {
   ], 'удали роль MODERATOR', visible), null)
 })
 
+test('new react files are taken from path comments and package.json', () => {
+  const visible = [
+    'Файлы:',
+    '```typescript',
+    '// src/App.tsx',
+    'export default function App() { return <h1>Привет, я родился</h1> }',
+    '```',
+    '```css',
+    '/* src/style.css */',
+    '.container { text-align: center; }',
+    '```',
+    '```json',
+    '{ "name": "app", "scripts": { "start": "vite" }, "dependencies": { "react": "^18.2.0" } }',
+    '```'
+  ].join('\n')
+  const snippets = describedSnippets(visible)
+  assert.deepEqual(snippets.map((item) => item.path), ['src/App.tsx', 'src/style.css', 'package.json'])
+  assert.equal(snippets[0]?.snippet.includes('// src/App.tsx'), false)
+  assert.match(snippets[0]?.snippet ?? '', /Привет, я родился/)
+  assert.equal(snippets[1]?.snippet.includes('style.css'), false)
+})
+
 test('an unrelated fragment is not applied', () => {
   const snippet = `export function Missing() {\n  return <div>Другой экран</div>\n}`
   assert.equal(snippetToEdit(buttonFile, snippet), null)
