@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from './edits'
+import { componentSnippet, describedLineEdit, describedSnippets, pathCommentFile, replacementContent, snippetToEdit } from './edits'
 
 const buttonFile = `export function Filters() {
   return (
@@ -75,8 +75,39 @@ test('a shown README is written to README.md', () => {
   const snippets = describedSnippets(visible, 'Обнови содержимое файла README.md')
   assert.equal(snippets[0]?.path, 'README.md')
   assert.match(snippets[0]?.snippet ?? '', /Привет, я родился/)
-  const next = replacementContent('Обнови содержимое файла README.md', 'README.md', snippets[0]?.snippet ?? '', '# React + TypeScript + Vite\n')
-  assert.match(next ?? '', /Привет, я родился/)
+  const nested = [
+    '```markdown',
+    '# Привет, я родился',
+    '',
+    '## Установка',
+    '',
+    '```bash',
+    'npm install',
+    '```',
+    '',
+    '## Запуск',
+    '',
+    '```bash',
+    'npm run dev',
+    '```',
+    '',
+    '## Структура',
+    '',
+    '```',
+    '.',
+    '├── src/App.tsx',
+    '```',
+    '',
+    '## Примечание',
+    '',
+    'Проект создан с Vite.',
+    '```'
+  ].join('\n')
+  const full = describedSnippets(nested, 'Обнови содержимое файла README.md')
+  assert.match(full[0]?.snippet ?? '', /```bash\nnpm install/)
+  assert.match(full[0]?.snippet ?? '', /npm run dev/)
+  assert.match(full[0]?.snippet ?? '', /src\/App\.tsx/)
+  assert.match(full[0]?.snippet ?? '', /Примечание/)
   assert.equal(replacementContent('что это за проект?', 'README.md', snippets[0]?.snippet ?? '', ''), null)
 })
 
@@ -85,6 +116,31 @@ test('a full App component without a path is still the page', () => {
   assert.match(componentSnippet(visible) ?? '', /Привет, я родился/)
   assert.equal(describedSnippets(visible).length, 0)
   assert.equal(componentSnippet('```tsx\nconst x = 1\n```'), null)
+})
+
+test('an unfenced path comment is the page file', () => {
+  const visible = [
+    'Запишу файл src/App.jsx с нужным кодом.',
+    '// src/App.jsx',
+    'import React from \'react\';',
+    '',
+    'function App() {',
+    '  return (',
+    '    <div>',
+    '      <h1>Привет, я родился</h1>',
+    '      <button>Перейти в google.com</button>',
+    '      <button>Обновить страницу</button>',
+    '    </div>',
+    '  );',
+    '}',
+    '',
+    'export default App;'
+  ].join('\n')
+  const file = pathCommentFile(visible)
+  assert.equal(file?.path, 'src/App.jsx')
+  assert.match(file?.snippet ?? '', /Привет, я родился/)
+  assert.doesNotMatch(file?.snippet ?? '', /Запишу файл/)
+  assert.equal(pathCommentFile('```jsx\n// src/App.jsx\nexport default function App() { return <h1>Привет</h1> }\n```'), null)
 })
 
 test('an unrelated fragment is not applied', () => {

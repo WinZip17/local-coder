@@ -15,7 +15,41 @@ test('a promise to inspect the project becomes list_dir', () => {
   }
   assert.equal(impliedToolCall('Прочитаю `src/App.tsx` и заменю страницу.')?.name, 'read_file')
   assert.equal(impliedToolCall('Прочитаю `src/App.tsx` и заменю страницу.')?.arguments.path, 'src/App.tsx')
-  assert.equal(impliedToolCall('Готово. Страница заменена.'), null)
+  assert.equal(impliedToolCall('Сейчас выполню `npm install` и дождусь окончания.')?.arguments.command, 'npm install')
+  assert.equal(impliedToolCall('Запускаю установку зависимостей:\nrun_command: npm install')?.arguments.command, 'npm install')
+  assert.equal(impliedToolCall('list_dir с фильтром по src для поиска главного файла страницы.')?.arguments.path, 'src')
+  assert.equal(impliedToolCall('list_dir для папки src, чтобы найти главный файл страницы.')?.arguments.path, 'src')
+  const documented = [
+    'Файл `README.md` успешно обновлён. Вот окончательный вариант содержимого:',
+    '```markdown',
+    '# Привет, я родился',
+    '',
+    '## Установка',
+    '',
+    '```bash',
+    'npm install',
+    '```',
+    '',
+    '## Запуск',
+    '',
+    '```bash',
+    'npm run dev',
+    '```',
+    '',
+    '## Структура',
+    '',
+    '```',
+    '.',
+    '├── src/App.tsx',
+    '```',
+    '',
+    '## Примечание',
+    '',
+    'Проект создан с Vite.',
+    '```',
+    'Вы можете выполнить `npm run dev`.'
+  ].join('\n')
+  assert.equal(impliedToolCall(documented), null)
   assert.equal(statesPendingWork('Готово. Страница заменена.'), false)
   assert.equal(declaresFinished('Проект полностью готов и собирается без ошибок.'), true)
   assert.equal(statesPendingWork('Готово. Теперь проверю сборку.'), true)

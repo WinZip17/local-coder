@@ -28,35 +28,67 @@ function isPackageToken(token: string): boolean {
   return /^(vite|vue|react|nuxt|next)(@|$)/i.test(token)
 }
 
+function isDirectoryToken(token: string): boolean {
+  return token === '.' || token === '..' || /^[\w.@-]+(?:[\\/][\w.@-]+)*$/.test(token)
+}
+
 export function scaffoldInCurrentFolder(command: string): string | null {
   const trimmed = command.trim()
   if (!/create-vite|create-react-app|create-vue|create-nuxt|create-next-app|\bnuxi\b|(?:npm|pnpm|yarn)\s+create\s+/i.test(trimmed)) return null
   const tokens = trimmed.split(/\s+/)
+  const kept: string[] = []
   const directories: number[] = []
   let lastPackage = -1
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] ?? ''
-    if (token === '--') continue
+    if (token === '--') {
+      kept.push(token)
+      continue
+    }
     if (token.startsWith('-')) {
-      if (FLAG_WITH_VALUE.has(token.toLowerCase())) index += 1
+      kept.push(token)
+      if (FLAG_WITH_VALUE.has(token.toLowerCase())) {
+        const value = tokens[index + 1]
+        if (value && !value.startsWith('-')) {
+          kept.push(value)
+          index += 1
+        }
+      }
       continue
     }
-    if (isRunner(token)) continue
+    if (isRunner(token)) {
+      kept.push(token)
+      continue
+    }
     if (isPackageToken(token)) {
-      lastPackage = index
+      kept.push(token)
+      lastPackage = kept.length - 1
       continue
     }
-    directories.push(index)
+    if (!isDirectoryToken(token)) break
+    directories.push(kept.length)
+    kept.push(token)
   }
-  if (directories.length === 0) tokens.splice(Math.max(lastPackage, 0) + 1, 0, '.')
+  if (directories.length === 0) kept.splice(Math.max(lastPackage, 0) + 1, 0, '.')
   else {
-    for (const index of directories) {
-      if (tokens[index] !== '.') tokens[index] = '.'
+    const first = directories[0] ?? 0
+    kept[first] = '.'
+    for (let index = directories.length - 1; index >= 1; index -= 1) {
+      const at = directories[index]
+      if (at !== undefined) kept.splice(at, 1)
     }
   }
-  const next = tokens.join(' ')
+  const next = kept.join(' ')
   if (/create-vite/i.test(next) && !/--overwrite\b/.test(next)) return `${next} --overwrite`
   return next
+}
+
+export function removesLocalCoder(command: string): boolean {
+  return /\.local-coder\b/i.test(command) && /\b(rm|rmdir|rd|del|erase|mv|move|ren|rename|remove-item)\b/i.test(command)
+}
+
+export function isCreateReactApp(command: string): boolean {
+  return /create-react-app/i.test(command)
 }
 
 export function isDirectoryChange(command: string): boolean {
@@ -150,7 +182,7 @@ function chosenOption(question: string, answer: string): string {
 
 export function commandFromCreationAnswer(question: string, answer: string): string | null {
   const source = chosenOption(question, answer)
-  const explicit = source.match(/(?:npx|npm|pnpm|yarn)\s+\S*(?:create[\w@.-]*|nuxi)[^)\n`;]*/i)
+  const explicit = source.match(/(?:npx|npm|pnpm|yarn)\s+\S*(?:create[\w@.-]*|nuxi)[^)\n`;—–]*/i)
   if (explicit?.[0]) return scaffoldInCurrentFolder(explicit[0].trim()) ?? explicit[0].trim()
   const text = source.toLowerCase()
   if (/create-react-app|create react app/.test(text)) return 'npx create-react-app .'
@@ -166,4 +198,17 @@ export function shouldAskCreationChoice(visible: string): boolean {
   const unique = new Set(generators.map((item) => item.toLowerCase()))
   if (unique.size >= 2) return true
   return /какой способ|выберите способ|уточните способ|какой вариант/i.test(visible)
+}
+
+const reactCreationQuestion = `Каким генератором создать React-проект?
+1) npx create-vite@latest . --template react-ts --overwrite — Vite + TypeScript
+2) npx create-vite@latest . --template react --overwrite — Vite + JavaScript
+3) npx create-react-app . — Create React App, только JavaScript`
+
+export function creationQuestion(userText: string, visible: string): string | null {
+  const text = visible.trim()
+  if (shouldAskCreationChoice(text) || /npx\s+\S*create|npm\s+create|nuxi/i.test(text)) return text
+  if (!/уточн|какой|вариант|способ|генератор|стек/i.test(text)) return null
+  if (/react/i.test(`${userText}\n${text}`)) return reactCreationQuestion
+  return text || null
 }

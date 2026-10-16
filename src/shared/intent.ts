@@ -1,4 +1,5 @@
 import type { ToolCall } from './parse'
+import { withoutFences } from './edits'
 
 const pending = /провер(?:ю|ить)|посмотр(?:ю|еть)|прочит(?:аю|ать)|запущ(?:у|ать)|выполн(?:ю|ить)|установ(?:лю|ить)|созда(?:м|ть)|замен(?:ю|ить)|вызов(?:у|ить)|сначала|затем|I'll |I will |let me /i
 const finished = /готово|полностью готов|задача (?:сделана|выполнена)|изменения внесены|ничего не (?:менял|нашёл|нашел)/i
@@ -21,6 +22,12 @@ function mentionedCommand(text: string): string | null {
   return bare?.[1]?.trim() ?? null
 }
 
+export function listedDirectory(text: string): string | null {
+  const named = text.match(/\blist_dir\b[^\n]{0,120}?\b(src|public|app|pages|components|docs)\b/i)
+    ?? text.match(/\bпапк\w*\s+(src|public|app|pages|components|docs)\b/i)
+  return named?.[1] ?? null
+}
+
 export function declaresFinished(visible: string): boolean {
   return finished.test(visible)
 }
@@ -34,19 +41,24 @@ export function statesPendingWork(visible: string): boolean {
 
 export function impliedToolCall(visible: string): ToolCall | null {
   const text = visible.trim()
-  if (!statesPendingWork(text) && !/\blist_dir\b|\bread_file\b/i.test(text)) return null
+  const explicitCommand = /\brun_command\b/i.test(text) || /\b(?:npm|npx|pnpm|yarn)\s+(?:install|ci)\b/i.test(text)
+  if (!statesPendingWork(text) && !/\blist_dir\b|\bread_file\b/i.test(text) && !explicitCommand) return null
   if (absent.test(text)) return null
 
-  const path = mentionedPath(text)
-  const command = mentionedCommand(text)
-  if (command && /запущу|выполню|установлю|\brun_command\b|\bnpm install\b|\bnpm run\b/i.test(text)) {
+  const prose = withoutFences(text)
+  const path = mentionedPath(prose)
+  const command = mentionedCommand(prose)
+  if (command && /запущу|запускаю|выполню|установлю|\brun_command\b/i.test(prose)) {
     return { name: 'run_command', arguments: { command } }
   }
-  if (path?.includes('.') && /прочит|открою|посмотрю файл|\bread_file\b|\bread\b/i.test(text)) {
+  if (path?.includes('.') && /прочит|открою|посмотрю файл|\bread_file\b|\bread\b/i.test(prose)) {
     return { name: 'read_file', arguments: { path, offset: 1 } }
   }
-  if (/\blist_dir\b|структур|содержим|файлы|что появилось|главн\S*\s+(?:файл|компонент)|каталог|папк/i.test(text)) {
-    const directory = path && !/\.[a-z0-9]+$/i.test(path) ? path : '.'
+  const listing = /\blist_dir\b|структур|файлы|что появилось|главн\S*\s+(?:файл|компонент)|каталог|папк/i.test(prose)
+    || (/содержим/i.test(prose) && /посмотр|провер|\blist_dir\b/i.test(prose))
+  if (listing) {
+    const listed = listedDirectory(prose)
+    const directory = listed || (path && !/\.[a-z0-9]+$/i.test(path) ? path : '.')
     return { name: 'list_dir', arguments: { path: directory } }
   }
   return null

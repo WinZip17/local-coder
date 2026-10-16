@@ -97,13 +97,82 @@ function pathComment(snippet: string): { path: string; body: string } {
   }
 }
 
+function fenceBlocks(visible: string): Array<{ header: string; body: string; start: number; end: number }> {
+  const lines = visible.split('\n')
+  const blocks: Array<{ header: string; body: string; start: number; end: number }> = []
+  let index = 0
+  while (index < lines.length) {
+    const open = (lines[index] ?? '').match(/^ {0,3}(`{3,})([^`]*)\s*$/)
+    if (!open?.[1]) {
+      index += 1
+      continue
+    }
+    const marker = open[1].length
+    const header = (open[2] ?? '').trim()
+    const markdown = /^(?:md|markdown)\b/i.test(header)
+    const body: string[] = []
+    let depth = 1
+    let cursor = index + 1
+    for (; cursor < lines.length; cursor += 1) {
+      const line = lines[cursor] ?? ''
+      const tick = line.match(/^ {0,3}(`{3,})([^`]*)\s*$/)
+      if (tick?.[1] && tick[1].length >= marker) {
+        const info = (tick[2] ?? '').trim()
+        if (markdown && info) {
+          depth += 1
+          body.push(line)
+          continue
+        }
+        if (markdown && depth > 1) {
+          depth -= 1
+          body.push(line)
+          continue
+        }
+        if (markdown && depth === 1) {
+          const upcoming = lines.slice(cursor + 1).find((item) => item.trim()) ?? ''
+          if (/^[.├│└┌┐─]/.test(upcoming) || /^\s+\S/.test(upcoming)) {
+            depth += 1
+            body.push(line)
+            continue
+          }
+        }
+        cursor += 1
+        break
+      }
+      body.push(line)
+    }
+    blocks.push({ header, body: body.join('\n'), start: index, end: cursor })
+    index = cursor
+  }
+  return blocks
+}
+
+export function pathCommentFile(visible: string): { path: string; snippet: string } | null {
+  const lines = withoutFences(visible).split('\n')
+  for (let index = 0; index < lines.length; index += 1) {
+    const comment = (lines[index] ?? '').trim().match(/^(?:\/\/|\/\*|#)\s*((?:[\w.@*-]+[\\/])*[\w.@*-]+\.[A-Za-z0-9]+)\s*(?:\*\/)?$/)
+    if (!comment?.[1]) continue
+    const body = lines.slice(index + 1).join('\n').replace(/^\n+|\n+$/g, '')
+    if (body.split('\n').filter((line) => line.trim()).length < 6) continue
+    if (!/export default|function\s+App\b/.test(body)) continue
+    return { path: comment[1].replace(/\\/g, '/'), snippet: body.endsWith('\n') ? body : `${body}\n` }
+  }
+  return null
+}
+
+export function withoutFences(visible: string): string {
+  const lines = visible.split('\n')
+  const skip = new Set<number>()
+  for (const block of fenceBlocks(visible)) {
+    for (let index = block.start; index < block.end; index += 1) skip.add(index)
+  }
+  return lines.filter((_, index) => !skip.has(index)).join('\n')
+}
 export function componentSnippet(visible: string): string | null {
-  const fence = /```([^\n`]*)\n([\s\S]*?)```/g
-  let match: RegExpExecArray | null
-  while ((match = fence.exec(visible))) {
-    const header = (match[1] ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  for (const block of fenceBlocks(visible)) {
+    const header = block.header.split(/\s+/)[0]?.toLowerCase() ?? ''
     if (header && !/^(?:tsx|jsx|vue|typescript|ts|javascript|js|react)?$/.test(header)) continue
-    const body = (match[2] ?? '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
+    const body = block.body.replace(/^\n+|\n+$/g, '')
     if (body.split('\n').length < 6) continue
     if (!/function\s+App\b/.test(body) || !/return\s*\(?/.test(body)) continue
     return body.endsWith('\n') ? body : `${body}\n`
@@ -119,21 +188,14 @@ function inferredPath(header: string, body: string): string {
 }
 
 export function describedSnippets(visible: string, userText = ''): Array<{ path: string; snippet: string }> {
+  const lines = visible.split('\n')
   const items: Array<{ path: string; snippet: string }> = []
-  const fence = /```([^\n`]*)\n([\s\S]*?)```/g
-  let match: RegExpExecArray | null
-  let cursor = 0
-  while ((match = fence.exec(visible))) {
-    const header = match[1] ?? ''
-    if (/^tool\b/i.test(header.trim())) {
-      cursor = match.index + match[0].length
-      continue
-    }
-    const before = visible.slice(Math.max(cursor, match.index - 200), match.index)
-    const raw = (match[2] ?? '').replace(/\r\n/g, '\n').replace(/^\n+|\n+$/g, '')
-    cursor = match.index + match[0].length
+  for (const block of fenceBlocks(visible)) {
+    if (/^tool\b/i.test(block.header)) continue
+    const before = lines.slice(Math.max(0, block.start - 8), block.start).join('\n')
+    const raw = block.body.replace(/^\n+|\n+$/g, '')
     const commented = pathComment(raw)
-    const path = commented.path || lastPath(header) || inferredPath(header, commented.body) || lastPath(before)
+    const path = commented.path || lastPath(block.header) || inferredPath(block.header, commented.body) || lastPath(before)
     const snippet = commented.path ? commented.body : raw
     if (snippet.trim().length < 8) continue
     items.push({ path, snippet })

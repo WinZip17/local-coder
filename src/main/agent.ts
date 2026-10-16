@@ -1,9 +1,9 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, dependenciesInstalled, generatorSucceeded, isDevServerCommand, isDirectoryChange, isInstallCommand, isProjectCreationRequest, isProjectInstall, normalizeCommand, scaffoldInCurrentFolder, shouldAskCreationChoice } from '../shared/creation'
-import { declaresFinished, impliedToolCall, pendingEditPath, statesPendingWork, toolAfterSilence } from '../shared/intent'
+import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isInstallCommand, isProjectCreationRequest, isProjectInstall, normalizeCommand, removesLocalCoder, scaffoldInCurrentFolder } from '../shared/creation'
+import { declaresFinished, impliedToolCall, listedDirectory, pendingEditPath, statesPendingWork, toolAfterSilence } from '../shared/intent'
 import { hoistScaffold } from './hoistScaffold'
-import { componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from '../shared/edits'
+import { pathCommentFile, componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from '../shared/edits'
 import type { ToolCall } from '../shared/parse'
 import { missingToolArgument, parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
 import { resolveInsideProject } from '../shared/safety'
@@ -299,6 +299,18 @@ async function editsFromAnswer(projectPath: string, visible: string, userText: s
       }
     }
   }
+  const loose = pathCommentFile(visible)
+  if (loose && !calls.some((call) => call.arguments.path === loose.path)) {
+    let current = ''
+    try {
+      current = await readFile(resolveInsideProject(projectPath, loose.path), 'utf8')
+    } catch {
+      current = ''
+    }
+    if (current.replace(/\r\n/g, '\n').trim() !== loose.snippet.trim()) {
+      calls.push({ name: 'write_file', arguments: { path: loose.path, content: loose.snippet } })
+    }
+  }
   return calls
 }
 
@@ -448,16 +460,20 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         parsed.calls.push({ name: 'list_dir', arguments: { path: '.' } })
       }
     }
-    if (creating && !parsed.calls.length && !parsed.errors.length && parsed.visible && shouldAskCreationChoice(parsed.visible) && !creationChoiceAnswered(chatId)) {
-      parsed.calls.push({ name: 'ask_user', arguments: { question: parsed.visible } })
+    if (creating && !parsed.calls.length && !parsed.errors.length && !projectWasGenerated(chatId) && !creationChoiceAnswered(chatId)) {
+      const question = creationQuestion(lastUserText(chatId), parsed.visible)
+      if (question) parsed.calls.push({ name: 'ask_user', arguments: { question } })
     }
     if (!parsed.calls.length && !parsed.errors.length) {
       if (step < stepLimit && failureNudges < 3 && commandFailed(lastToolText(chatId))) {
         failureNudges += 1
         const missingPackages = /ERR_MODULE_NOT_FOUND|Cannot find package|Cannot find module|зациклил/i.test(lastToolText(chatId))
+        const craBlocked = /create-react-app|could conflict|\.local-coder/i.test(lastToolText(chatId))
         const reminder = makeMessage('tool', missingPackages
           ? 'Пакеты проекта не установлены. Вызови run_command только с npm install и дождись кода 0. Не запускай npm run dev, не ставь пакеты по одному и не меняй vite.config.'
-          : 'Команда завершилась с ошибкой. Исправь причину в файлах или другой командой и запусти её снова. Не заканчивай задачу пересказом ошибки.', 'tool')
+          : craBlocked
+            ? 'Папку .local-coder удалять нельзя. create-react-app рядом с ней не запускается. Вызови npx create-vite@latest . --template react-ts --overwrite.'
+            : 'Команда завершилась с ошибкой. Исправь причину в файлах или другой командой и запусти её снова. Не заканчивай задачу пересказом ошибки.', 'tool')
         await addMessage(chatId, reminder)
         emit({ type: 'message', chatId, message: reminder })
         continue
@@ -511,6 +527,19 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       break
     }
 
+    if (creating && !projectWasGenerated(chatId) && !creationChoiceAnswered(chatId)) {
+      const question = creationQuestion(lastUserText(chatId), parsed.visible)
+      if (question) {
+        let filled = false
+        parsed.calls = parsed.calls.filter((call) => {
+          if (call.name !== 'ask_user' || String(call.arguments.question ?? '').trim()) return true
+          if (filled) return false
+          call.arguments = { ...call.arguments, question }
+          filled = true
+          return true
+        })
+      }
+    }
     if (creating && !projectWasGenerated(chatId)) {
       const choice = lastCreationChoice(chatId)
       const chosen = choice ? commandFromCreationAnswer(choice.question, choice.answer) : null
@@ -537,6 +566,11 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         results.push(`${call.name}: пропущен, сначала нужно учесть ответ пользователя.`)
         continue
       }
+      if (call.name === 'list_dir') {
+        const current = typeof call.arguments.path === 'string' ? call.arguments.path.trim() : ''
+        const listed = listedDirectory(parsed.visible)
+        if (listed && (current === '' || current === '.' || current === './')) call.arguments = { ...call.arguments, path: listed }
+      }
       if (call.name === 'run_command') {
         const original = typeof call.arguments.command === 'string' ? call.arguments.command.trim() : ''
         if (isDirectoryChange(original)) {
@@ -546,6 +580,14 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         const placed = scaffoldInCurrentFolder(original)
         if (placed && placed !== original) call.arguments = { ...call.arguments, command: placed }
         let command = typeof call.arguments.command === 'string' ? call.arguments.command : original
+        if (removesLocalCoder(command)) {
+          results.push('run_command отклонён: папку .local-coder удалять и переименовывать нельзя. create-react-app рядом с ней не запускается. Вызови npx create-vite@latest . --template react-ts --overwrite.')
+          continue
+        }
+        if (isCreateReactApp(command)) {
+          results.push('run_command отклонён: create-react-app не создаёт проект рядом с .local-coder. Папку не удаляй. Вызови npx create-vite@latest . --template react-ts --overwrite или --template react для JavaScript.')
+          continue
+        }
         const installed = dependenciesInstalled(requireChat(chatId).messages.filter((message) => message.role === 'tool').map((message) => message.content))
         if (!installed && (isDevServerCommand(command) || (isInstallCommand(command) && !isProjectInstall(command)))) {
           if (installBroken && isDevServerCommand(command)) {

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, dependenciesInstalled, generatorSucceeded, isDevServerCommand, isDirectoryChange, isProjectCreationRequest, isProjectInstall, outputLooped, scaffoldInCurrentFolder, shouldAskCreationChoice } from './creation'
+import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isProjectCreationRequest, isProjectInstall, outputLooped, removesLocalCoder, scaffoldInCurrentFolder, shouldAskCreationChoice } from './creation'
 
 test('project creation is detected for any stack', () => {
   assert.equal(isProjectCreationRequest('создай проект на react'), true)
@@ -36,9 +36,19 @@ test('a generator command lands in the current folder', () => {
   )
   assert.equal(scaffoldInCurrentFolder('npm create vite@latest my-app -- --template react'), 'npm create vite@latest . -- --template react')
   assert.equal(scaffoldInCurrentFolder('npm install'), null)
+  assert.equal(
+    scaffoldInCurrentFolder('npx create-react-app . --overwrite После установки заменю содержимое'),
+    'npx create-react-app . --overwrite'
+  )
+  assert.equal(scaffoldInCurrentFolder('npx create-react-app . --overwrite . . . . . .'), 'npx create-react-app . --overwrite')
   assert.equal(isDirectoryChange('cd vite-project'), true)
   assert.equal(isDevServerCommand('npm run dev'), true)
   assert.equal(isDevServerCommand('npm install'), false)
+  assert.equal(removesLocalCoder('rm -rf .local-coder'), true)
+  assert.equal(removesLocalCoder('mv .local-coder .local-coder-backup'), true)
+  assert.equal(removesLocalCoder('npm install'), false)
+  assert.equal(isCreateReactApp('npx create-react-app .'), true)
+  assert.equal(isCreateReactApp('npx create-vite@latest . --template react-ts --overwrite'), false)
 })
 
 test('a numbered creation answer becomes the generator command', () => {
@@ -80,6 +90,15 @@ test('dev before a plain install is not ready', () => {
   const loop = Array.from({ length: 6 }, () => '✓ 12 modules loaded\n✓ 12 modules reloaded\n✓ 12 modules invalidated').join('\n')
   assert.equal(outputLooped(loop), true)
   assert.equal(outputLooped('added 27 packages\nПроцесс завершился с кодом 0.'), false)
+})
+
+test('an empty React choice still becomes the Vite TypeScript command', () => {
+  const visible = 'Проект пустой, поэтому его нужно создать генератором. Уточню вариант:'
+  const question = creationQuestion('создай простой проект на react', visible)
+  assert.match(question ?? '', /react-ts/)
+  assert.equal(commandFromCreationAnswer(question ?? '', '1'), 'npx create-vite@latest . --template react-ts --overwrite')
+  assert.equal(creationQuestion('создай проект на react', 'Сначала посмотрю файлы'), null)
+  assert.equal(shouldAskCreationChoice(visible), false)
 })
 
 test('creation options in prose must go through ask_user', () => {
