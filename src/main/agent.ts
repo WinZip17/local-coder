@@ -1,9 +1,9 @@
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isInstallCommand, isProjectCreationRequest, isProjectInstall, normalizeCommand, removesLocalCoder, scaffoldInCurrentFolder } from '../shared/creation'
+import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isInstallCommand, isProjectCreationRequest, normalizeCommand, removesLocalCoder, scaffoldInCurrentFolder, unfinishedPackageInstall } from '../shared/creation'
 import { declaresFinished, impliedToolCall, listedDirectory, pendingEditPath, statesPendingWork, toolAfterSilence } from '../shared/intent'
 import { hoistScaffold } from './hoistScaffold'
-import { pathCommentFile, componentSnippet, describedLineEdit, describedSnippets, replacementContent, snippetToEdit } from '../shared/edits'
+import { pathCommentFile, clipToFirstCommand, componentSnippet, describedLineEdit, describedSnippets, hasUnclosedFence, replacementContent, shellCommand, snippetToEdit } from '../shared/edits'
 import type { ToolCall } from '../shared/parse'
 import { missingToolArgument, parseModelOutput, shouldNudgeFileEdit } from '../shared/parse'
 import { resolveInsideProject } from '../shared/safety'
@@ -117,6 +117,18 @@ function userAskedToRepeat(chatId: string): boolean {
   return /ещё раз|еще раз|повтор(?:и|ите|ить)|заново|снова запусти|запусти снова|перезапусти/i.test(lastUserText(chatId))
 }
 
+function stalledAfterDuplicate(chatId: string): boolean {
+  const messages = requireChat(chatId).messages
+  const start = Math.max(0, messages.length - 8)
+  for (let index = messages.length - 1; index >= start; index -= 1) {
+    const message = messages[index]
+    if (!message || message.role !== 'tool') continue
+    if (/(?:^|\n\n)(?:write_file|edit_file) \S[^\n]*(?:записано|заменено)/i.test(message.content)) return false
+    if (/Повторно не запускаю/.test(message.content)) return true
+  }
+  return false
+}
+
 function projectInstallCommand(chatId: string): string {
   for (let index = requireChat(chatId).messages.length - 1; index >= 0; index -= 1) {
     const message = requireChat(chatId).messages[index]
@@ -132,6 +144,10 @@ function projectInstallCommand(chatId: string): string {
 
 function chatCreatesProject(chatId: string): boolean {
   return requireChat(chatId).messages.some((message) => message.role === 'user' && isProjectCreationRequest(message.content))
+}
+
+function taskNeedsStages(chatId: string): boolean {
+  return requireChat(chatId).messages.some((message) => message.role === 'user' && /поэтап|план разработ|карту проекта|между каждыми этапами/i.test(message.content))
 }
 
 function lastCreationChoice(chatId: string): { question: string; answer: string } | null {
@@ -390,7 +406,12 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
   let adjustNudges = 0
   let intentNudges = 0
   let emptyAnswers = 0
-  let stepLimit = chatCreatesProject(chatId) ? 12 : MAX_STEPS
+  let cutNudges = 0
+  let packageNudges = 0
+  let stallNudges = 0
+  let planStopNudges = 0
+  let echoNudges = 0
+  let stepLimit = taskNeedsStages(chatId) ? 24 : chatCreatesProject(chatId) ? 12 : MAX_STEPS
   const hardLimit = stepLimit + 4
   let cutoff = true
   const doneCommands = new Set<string>()
@@ -401,30 +422,61 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     const settings = getSettings()
     const problem = modelProblem(settings)
     if (problem) throw new Error(problem)
+    const pendingPackages = unfinishedPackageInstall(requireChat(chatId).messages)
+    if (pendingPackages && packageNudges < 2) {
+      packageNudges += 1
+      const reminder = makeMessage('tool', `Пакеты из этапа не установлены: вместо них выполнился npm install. Следующим ответом вызови только эту команду: ${pendingPackages}. Следующий этап не начинай.`, 'tool')
+      await addMessage(chatId, reminder)
+      emit({ type: 'message', chatId, message: reminder })
+    }
+    if (!pendingPackages && stallNudges < 3 && taskNeedsStages(chatId) && stalledAfterDuplicate(chatId)) {
+      stallNudges += 1
+      const reminder = makeMessage('tool', 'Эта команда уже выполнена. Не повторяй её и не вызывай только update_project_map. Следующим ответом вызови write_file и запиши один следующий файл страницы.', 'tool')
+      await addMessage(chatId, reminder)
+      emit({ type: 'message', chatId, message: reminder })
+    }
     const contextSize = settings.activeProvider === 'local' ? settings.local.contextSize : 8192
+    const early = new AbortController()
+    const followParent = () => early.abort()
+    signal.addEventListener('abort', followParent)
     let streamed = ''
     let output = ''
     let emptyAnswer = false
+    let commandSeen = false
     try {
       output = await completeChat({
         settings,
         messages: [{ role: 'system', content: buildSystemPrompt(projectPath, map, contextSize) }, ...transcript(chatId)],
         onToken: (text) => {
-          streamed += text
-          emit({ type: 'token', chatId, text })
+          if (commandSeen) return
+          const next = streamed + text
+          const clipped = clipToFirstCommand(next)
+          const piece = clipped.startsWith(streamed) ? clipped.slice(streamed.length) : clipped
+          streamed = clipped
+          if (piece) emit({ type: 'token', chatId, text: piece })
+          if (shellCommand(clipped)) {
+            commandSeen = true
+            if (!signal.aborted) early.abort()
+          }
         },
         onStatus: (text) => emit({ type: 'status', chatId, text }),
-        signal
+        signal: early.signal
       })
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      if (!/пустой ответ/.test(message)) throw error
-      emit({ type: 'flush', chatId })
-      emptyAnswer = true
-      output = ''
+      if (signal.aborted) throw error
+      if (commandSeen && shellCommand(streamed)) output = streamed
+      else {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!/пустой ответ/.test(message)) throw error
+        emit({ type: 'flush', chatId })
+        emptyAnswer = true
+        output = ''
+      }
+    } finally {
+      signal.removeEventListener('abort', followParent)
     }
     emit({ type: 'flush', chatId })
-    const parsed = parseModelOutput(output || streamed)
+    const parsed = parseModelOutput(clipToFirstCommand(output || streamed))
     const creating = chatCreatesProject(chatId)
     if (creating && !parsed.calls.length && !parsed.errors.length && !projectWasGenerated(chatId)) {
       const choice = lastCreationChoice(chatId)
@@ -432,11 +484,23 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       if (command) parsed.calls.push({ name: 'run_command', arguments: { command } })
     }
     if (parsed.visible && sameText(parsed.visible, previousAssistant(chatId)) && !parsed.calls.length) return
+    const shownCommand = parsed.calls.some((call) => call.name === 'run_command') ? null : shellCommand(parsed.visible)
+    if (shownCommand) {
+      parsed.calls = parsed.calls.filter((call) => call.name === 'run_command')
+      parsed.calls.push({ name: 'run_command', arguments: { command: shownCommand } })
+    }
     const alreadyWrites = parsed.calls.some((call) => call.name === 'edit_file' || call.name === 'write_file')
-    if (!edited && !alreadyWrites && parsed.visible && creationAllowsFiles(chatId)) {
+    let deferredFiles = 0
+    let wroteThisStep = false
+    const generatorShown = Boolean(shownCommand && /create-next-app|create-vite|create-react-app|create-vue|nuxi/i.test(shownCommand))
+    if (!generatorShown && !alreadyWrites && parsed.visible && creationAllowsFiles(chatId)) {
       const candidate = creating && projectWasGenerated(chatId) ? lastReadPage(chatId) : ''
       const pagePath = candidate && !pageWrittenSinceScaffold(chatId, candidate) ? candidate : ''
-      parsed.calls.push(...await editsFromAnswer(projectPath, parsed.visible, lastUserText(chatId), pagePath))
+      const extracted = await editsFromAnswer(projectPath, parsed.visible, lastUserText(chatId), pagePath)
+      const files = extracted.filter((call) => call.name === 'write_file' || call.name === 'edit_file')
+      deferredFiles = Math.max(0, files.length - 1)
+      const first = files[0]
+      if (first) parsed.calls.push(first)
     }
     if (parsed.visible) {
       const message = makeMessage('assistant', parsed.visible, 'text')
@@ -449,6 +513,9 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       const listed = previous.match(/^list_dir\s+(\S+)/)
       const repeated = implied?.name === 'list_dir' && listed?.[1] === implied.arguments.path
       if (implied && !repeated) parsed.calls.push(implied)
+    }
+    if (!parsed.calls.length && !parsed.errors.length && /update_project_map/i.test(parsed.visible) && /только update_project_map/.test(lastToolText(chatId))) {
+      parsed.calls.push({ name: 'update_project_map', arguments: { summary: 'Этап выполнен.', notes: ['Команда этапа завершилась успешно'] } })
     }
     if (emptyAnswer && !parsed.calls.length && !parsed.errors.length) {
       const previous = lastToolText(chatId)
@@ -478,7 +545,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         emit({ type: 'message', chatId, message: reminder })
         continue
       }
-      if (creating && projectWasGenerated(chatId) && !edited && !filesWereEdited(chatId) && step < stepLimit && adjustNudges < 2) {
+      if (!taskNeedsStages(chatId) && creating && projectWasGenerated(chatId) && !edited && !filesWereEdited(chatId) && step < stepLimit && adjustNudges < 2) {
         adjustNudges += 1
         const reminder = makeMessage('tool', 'Шаблон генератора ещё не изменён. Пересказ правок файл не меняет. Вызови list_dir, найди главный файл страницы и вызови write_file по этому пути, например src/App.tsx или src/App.jsx. Передай полный новый текст: только то, что просил пользователь. Демо-блоки шаблона удали. Не придумывай путь с именем папки проекта.', 'tool')
         await addMessage(chatId, reminder)
@@ -523,7 +590,35 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         emit({ type: 'message', chatId, message: reminder })
         continue
       }
+      if (cutNudges < 3 && step < stepLimit && hasUnclosedFence(parsed.visible)) {
+        cutNudges += 1
+        const reminder = makeMessage('tool', 'Ответ оборвался на незаконченном файле. Следующим ответом вызови write_file для одного полного файла. Остальные файлы в этот ответ не копируй.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (echoNudges < 4 && /^update_project_map\b/i.test(parsed.visible.trim()) && /update_project_map:/.test(lastToolText(chatId))) {
+        echoNudges += 1
+        const reminder = makeMessage('tool', 'Карта уже обновлена. Следующим ответом выполни следующий пункт плана: одна команда или один файл. update_project_map повторно не вызывай.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
       cutoff = statesPendingWork(parsed.visible)
+      if (!cutoff && stallNudges < 3 && taskNeedsStages(chatId) && stalledAfterDuplicate(chatId)) {
+        stallNudges += 1
+        const reminder = makeMessage('tool', 'Этап не закончен. Команда уже выполнена, пересказ её не продолжает. Следующим ответом вызови write_file и запиши один следующий файл страницы.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
+      if (!cutoff && planStopNudges < 2 && taskNeedsStages(chatId) && step < hardLimit) {
+        planStopNudges += 1
+        const reminder = makeMessage('tool', 'План ещё не закончен. Следующим ответом продолжи следующий пункт: одна команда или один write_file, затем update_project_map.', 'tool')
+        await addMessage(chatId, reminder)
+        emit({ type: 'message', chatId, message: reminder })
+        continue
+      }
       break
     }
 
@@ -581,7 +676,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         if (placed && placed !== original) call.arguments = { ...call.arguments, command: placed }
         let command = typeof call.arguments.command === 'string' ? call.arguments.command : original
         if (removesLocalCoder(command)) {
-          results.push('run_command отклонён: папку .local-coder удалять и переименовывать нельзя. create-react-app рядом с ней не запускается. Вызови npx create-vite@latest . --template react-ts --overwrite.')
+          results.push('run_command отклонён: папку .local-coder удалять нельзя, это служебная папка. Для Next.js вызови npx create-next-app@latest . --ts --no-tailwind --eslint --app --src-dir --use-npm --import-alias "@/*". Для React вызови npx create-vite@latest . --template react-ts --overwrite.')
           continue
         }
         if (isCreateReactApp(command)) {
@@ -589,7 +684,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
           continue
         }
         const installed = dependenciesInstalled(requireChat(chatId).messages.filter((message) => message.role === 'tool').map((message) => message.content))
-        if (!installed && (isDevServerCommand(command) || (isInstallCommand(command) && !isProjectInstall(command)))) {
+        if (!installed && isDevServerCommand(command)) {
           if (installBroken && isDevServerCommand(command)) {
             results.push('run_command пропущен: установка зависимостей завершилась с ошибкой. Сначала исправь её, npm run dev не запускай.')
             continue
@@ -603,7 +698,7 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
         }
         const key = normalizeCommand(command)
         if (key && !userAskedToRepeat(chatId) && (doneCommands.has(key) || commandAlreadySucceeded(successfulCommands(chatId), key))) {
-          results.push(`run_command ${key}\nЭта команда уже завершилась с кодом 0. Повторно не запускаю.`)
+          results.push(`run_command ${key}\nЭта команда уже завершилась с кодом 0. Повторно не запускаю. Следующим ответом вызови write_file для одного следующего файла. Эту команду не повторяй.`)
           continue
         }
       }
@@ -618,7 +713,10 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
           if (lifted) result += `\n${lifted}`
         }
       }
-      if ((call.name === 'edit_file' || call.name === 'write_file') && !/ошибка/i.test(result)) edited = true
+      if ((call.name === 'edit_file' || call.name === 'write_file') && !/ошибка/i.test(result)) {
+        edited = true
+        wroteThisStep = true
+      }
       results.push(result)
       if (call.name === 'ask_user') stopForQuestion = true
       if (call.name === 'update_project_map') map = await ensureProjectMap(projectPath)
@@ -626,6 +724,18 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
     const toolMessage = makeMessage('tool', results.join('\n\n'), 'tool')
     await addMessage(chatId, toolMessage)
     emit({ type: 'message', chatId, message: toolMessage })
+    const staged = taskNeedsStages(chatId)
+    if (wroteThisStep && (deferredFiles > 0 || staged) && !parsed.calls.some((call) => call.name === 'update_project_map') && step < hardLimit) {
+      const reminder = makeMessage('tool', 'За этот ход записан один файл. Следующим ответом вызови только update_project_map. Следующий пункт плана начнётся после карты.', 'tool')
+      await addMessage(chatId, reminder)
+      emit({ type: 'message', chatId, message: reminder })
+    }
+    const ranFreshCommand = ranNewCommand && results.some((result) => /run_command/.test(result) && /Процесс завершился с кодом 0/.test(result) && !/Повторно не запускаю/.test(result))
+    if (staged && ranFreshCommand && !wroteThisStep && !parsed.calls.some((call) => call.name === 'update_project_map') && step < hardLimit) {
+      const reminder = makeMessage('tool', 'Команда этапа выполнена. Следующим ответом вызови только update_project_map. Новую команду и файлы в этот ответ не добавляй.', 'tool')
+      await addMessage(chatId, reminder)
+      emit({ type: 'message', chatId, message: reminder })
+    }
     if (emptyToolSteps >= 2) {
       const saved = !creating || filesWereEdited(chatId) || projectWasGenerated(chatId)
       const stop = makeMessage('assistant', saved
@@ -636,13 +746,14 @@ async function runLoop(chatId: string, emit: (event: AgentEvent) => void, signal
       return
     }
     const failedNow = results.some((result) => commandFailed(result) || /ошибка/i.test(result))
-    if (declaresFinished(parsed.visible) && !statesPendingWork(parsed.visible) && !failedNow) {
+    if (deferredFiles === 0 && declaresFinished(parsed.visible) && !statesPendingWork(parsed.visible) && !failedNow && !stalledAfterDuplicate(chatId)) {
       if (!ranNewCommand) return
       cutoff = false
     }
     const onlyFiles = parsed.calls.every((call) => call.name === 'write_file' || call.name === 'edit_file')
     const writeFailed = results.some((result) => /write_file ошибка/i.test(result))
-    if (!creating && edited && onlyFiles && parsed.calls.some((call) => call.name === 'write_file') && !writeFailed) return
+    const stagedNow = taskNeedsStages(chatId)
+    if (!creating && !stagedNow && edited && onlyFiles && parsed.calls.some((call) => call.name === 'write_file') && !writeFailed) return
   }
 
   if (!cutoff) return

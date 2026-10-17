@@ -6,24 +6,26 @@ export interface SnippetEdit {
 
 const sourcePath = /(?<![A-Za-z0-9_./-])((?:[A-Za-z0-9_.@-]+[\\/])+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]+)(?![A-Za-z0-9_./-])/g
 const bareFile = /(?<![A-Za-z0-9_./-])([A-Za-z][\w.@-]*\.(?:md|markdown|txt|json|html|css|scss|ts|tsx|js|jsx|vue|svg|mjs|cjs))(?![A-Za-z0-9_./-])/gi
+const frameworkName = /^(?:next|node|vue|nuxt|react|express|three|d3)\.js$/i
+
+function rememberFile(value: string): string {
+  return frameworkName.test(value) ? '' : value.replace(/\\/g, '/')
+}
 
 function lastPath(text: string): string {
   sourcePath.lastIndex = 0
   bareFile.lastIndex = 0
   let found = ''
   let at = -1
-  for (const match of text.matchAll(sourcePath)) {
-    if (match.index !== undefined && match.index >= at && match[1]) {
-      found = match[1].replace(/\\/g, '/')
-      at = match.index
-    }
+  const take = (match: RegExpMatchArray) => {
+    if (match.index === undefined || match.index < at || !match[1]) return
+    const path = rememberFile(match[1])
+    if (!path) return
+    found = path
+    at = match.index
   }
-  for (const match of text.matchAll(bareFile)) {
-    if (match.index !== undefined && match.index >= at && match[1]) {
-      found = match[1].replace(/\\/g, '/')
-      at = match.index
-    }
-  }
+  for (const match of text.matchAll(sourcePath)) take(match)
+  for (const match of text.matchAll(bareFile)) take(match)
   return found
 }
 
@@ -32,8 +34,9 @@ function namedFiles(text: string): string[] {
   bareFile.lastIndex = 0
   const found: string[] = []
   const add = (value: string) => {
-    const path = value.replace(/\\/g, '/')
-    if (!found.includes(path)) found.push(path)
+    const path = rememberFile(value)
+    if (!path || found.includes(path)) return
+    found.push(path)
   }
   for (const match of text.matchAll(sourcePath)) if (match[1]) add(match[1])
   for (const match of text.matchAll(bareFile)) if (match[1]) add(match[1])
@@ -97,9 +100,9 @@ function pathComment(snippet: string): { path: string; body: string } {
   }
 }
 
-function fenceBlocks(visible: string): Array<{ header: string; body: string; start: number; end: number }> {
+function fenceBlocks(visible: string): Array<{ header: string; body: string; start: number; end: number; closed: boolean }> {
   const lines = visible.split('\n')
-  const blocks: Array<{ header: string; body: string; start: number; end: number }> = []
+  const blocks: Array<{ header: string; body: string; start: number; end: number; closed: boolean }> = []
   let index = 0
   while (index < lines.length) {
     const open = (lines[index] ?? '').match(/^ {0,3}(`{3,})([^`]*)\s*$/)
@@ -112,6 +115,7 @@ function fenceBlocks(visible: string): Array<{ header: string; body: string; sta
     const markdown = /^(?:md|markdown)\b/i.test(header)
     const body: string[] = []
     let depth = 1
+    let closed = false
     let cursor = index + 1
     for (; cursor < lines.length; cursor += 1) {
       const line = lines[cursor] ?? ''
@@ -137,14 +141,19 @@ function fenceBlocks(visible: string): Array<{ header: string; body: string; sta
           }
         }
         cursor += 1
+        closed = true
         break
       }
       body.push(line)
     }
-    blocks.push({ header, body: body.join('\n'), start: index, end: cursor })
+    blocks.push({ header, body: body.join('\n'), start: index, end: cursor, closed })
     index = cursor
   }
   return blocks
+}
+
+export function hasUnclosedFence(visible: string): boolean {
+  return fenceBlocks(visible).some((block) => !block.closed)
 }
 
 export function pathCommentFile(visible: string): { path: string; snippet: string } | null {
@@ -172,6 +181,7 @@ export function componentSnippet(visible: string): string | null {
   for (const block of fenceBlocks(visible)) {
     const header = block.header.split(/\s+/)[0]?.toLowerCase() ?? ''
     if (header && !/^(?:tsx|jsx|vue|typescript|ts|javascript|js|react)?$/.test(header)) continue
+    if (!block.closed) continue
     const body = block.body.replace(/^\n+|\n+$/g, '')
     if (body.split('\n').length < 6) continue
     if (!/function\s+App\b/.test(body) || !/return\s*\(?/.test(body)) continue
@@ -191,7 +201,7 @@ export function describedSnippets(visible: string, userText = ''): Array<{ path:
   const lines = visible.split('\n')
   const items: Array<{ path: string; snippet: string }> = []
   for (const block of fenceBlocks(visible)) {
-    if (/^tool\b/i.test(block.header)) continue
+    if (!block.closed || /^tool\b/i.test(block.header) || isShellFence(block.header)) continue
     const before = lines.slice(Math.max(0, block.start - 8), block.start).join('\n')
     const raw = block.body.replace(/^\n+|\n+$/g, '')
     const commented = pathComment(raw)
@@ -213,6 +223,33 @@ export function describedSnippets(visible: string, userText = ''): Array<{ path:
     unique.push(item)
   }
   return unique
+}
+
+function isShellFence(header: string): boolean {
+  const lang = header.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  return /^(?:bash|sh|shell|zsh|console|powershell|ps1|cmd)$/.test(lang)
+}
+
+function firstShellBlock(visible: string): { command: string; endLine: number } | null {
+  for (const block of fenceBlocks(visible)) {
+    if (!block.closed || !isShellFence(block.header)) continue
+    const command = block.body
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith('#') && /^(?:npx|npm|pnpm|yarn|bun)\b/.test(line))
+    if (command) return { command, endLine: block.end }
+  }
+  return null
+}
+
+export function shellCommand(visible: string): string | null {
+  return firstShellBlock(visible)?.command ?? null
+}
+
+export function clipToFirstCommand(visible: string): string {
+  const found = firstShellBlock(visible)
+  if (!found) return visible
+  return visible.split('\n').slice(0, found.endLine).join('\n')
 }
 
 export function replacementContent(userText: string, path: string, snippet: string, fileText: string): string | null {

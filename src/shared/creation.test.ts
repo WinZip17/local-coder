@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isProjectCreationRequest, isProjectInstall, outputLooped, removesLocalCoder, scaffoldInCurrentFolder, shouldAskCreationChoice } from './creation'
+import { commandAlreadySucceeded, commandFailed, commandFromCreationAnswer, creationQuestion, dependenciesInstalled, generatorSucceeded, isCreateReactApp, isDevServerCommand, isDirectoryChange, isProjectCreationRequest, isProjectInstall, outputLooped, removesLocalCoder, scaffoldInCurrentFolder, shouldAskCreationChoice, unfinishedPackageInstall } from './creation'
 
 test('project creation is detected for any stack', () => {
   assert.equal(isProjectCreationRequest('создай проект на react'), true)
@@ -41,6 +41,10 @@ test('a generator command lands in the current folder', () => {
     'npx create-react-app . --overwrite'
   )
   assert.equal(scaffoldInCurrentFolder('npx create-react-app . --overwrite . . . . . .'), 'npx create-react-app . --overwrite')
+  assert.equal(
+    scaffoldInCurrentFolder('npx create-next-app@latest . --typescript --overwrite'),
+    'npx create-next-app@latest scaffold-next --ts --no-tailwind --eslint --app --src-dir --use-npm --import-alias "@/*"'
+  )
   assert.equal(isDirectoryChange('cd vite-project'), true)
   assert.equal(isDevServerCommand('npm run dev'), true)
   assert.equal(isDevServerCommand('npm install'), false)
@@ -87,6 +91,12 @@ test('dev before a plain install is not ready', () => {
   assert.equal(dependenciesInstalled([generated, onePackage]), false)
   assert.equal(dependenciesInstalled([generated, install]), true)
   assert.equal(dependenciesInstalled(['run_command npm test\nПроцесс завершился с кодом 0.']), true)
+  const mui = 'npm install @mui/material @emotion/react @emotion/styled'
+  const asked = { role: 'assistant', content: `\`\`\`bash\n${mui}\n\`\`\`` }
+  const plain = { role: 'tool', content: 'run_command npm install\nup to date, audited 345 packages\nПроцесс завершился с кодом 0.' }
+  const exact = { role: 'tool', content: `run_command ${mui}\nadded 3 packages\nПроцесс завершился с кодом 0.` }
+  assert.equal(unfinishedPackageInstall([asked, plain]), mui)
+  assert.equal(unfinishedPackageInstall([asked, exact]), null)
   const loop = Array.from({ length: 6 }, () => '✓ 12 modules loaded\n✓ 12 modules reloaded\n✓ 12 modules invalidated').join('\n')
   assert.equal(outputLooped(loop), true)
   assert.equal(outputLooped('added 27 packages\nПроцесс завершился с кодом 0.'), false)
@@ -105,4 +115,29 @@ test('creation options in prose must go through ask_user', () => {
   const visible = 'Можно npx create-vite или npx create-react-app. Какой способ выбрать?'
   assert.equal(shouldAskCreationChoice(visible), true)
   assert.equal(shouldAskCreationChoice('Страница готова.'), false)
+})
+
+test('a long clarification stays a short question', () => {
+  const visible = [
+    'Для создания сайта новостей я начну с большого плана и перечислю все файлы заранее.',
+    'Давайте уточним несколько моментов:',
+    '1. Какой шаблон Next.js вы предпочитаете: с TypeScript или без?',
+    '2. Хотите ли вы использовать Tailwind CSS в дополнение к MUI?',
+    'После получения ответа я создам проект и начну реализацию поэтапно.'
+  ].join('\n')
+  const question = creationQuestion('Создай сайт новостей на Next.js и обновляй карту проекта', visible) ?? ''
+  assert.match(question, /TypeScript/)
+  assert.doesNotMatch(question, /большого плана/)
+  assert.ok(question.length < 400)
+})
+
+test('a numbered plan is not a clarification', () => {
+  const visible = [
+    'После выполнения всех шагов обновим карту проекта. Стек уже выбран.',
+    '1. Создание проекта с использованием Next.js',
+    '2. Настройка стилей с использованием @mui/material',
+    '3. Настройка Redux Toolkit и Zustand для управления состоянием',
+    '4. Реализация главной страницы с инфинити скроллом'
+  ].join('\n')
+  assert.equal(creationQuestion('Создай сайт новостей на Next.js и обновляй карту проекта', visible), null)
 })

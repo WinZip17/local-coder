@@ -1,3 +1,5 @@
+import { shellCommand } from './edits'
+
 export function isProjectCreationRequest(text: string): boolean {
   return /созда(й|ть|йте)|create/i.test(text) && /проект|приложен|project|\bapp\b/i.test(text)
 }
@@ -16,7 +18,7 @@ export function generatorSucceeded(toolText: string): boolean {
     && !/operation cancelled/i.test(toolText)
 }
 
-const FLAG_WITH_VALUE = new Set(['--template', '-t', '--project-name'])
+const FLAG_WITH_VALUE = new Set(['--template', '-t', '--project-name', '--import-alias'])
 
 function isRunner(token: string): boolean {
   return /^(npx|npm|pnpm|yarn|bun)$/i.test(token)
@@ -79,8 +81,41 @@ export function scaffoldInCurrentFolder(command: string): string | null {
     }
   }
   const next = kept.join(' ')
+  if (/create-next-app/i.test(next)) return normalizeCreateNextApp(next)
   if (/create-vite/i.test(next) && !/--overwrite\b/.test(next)) return `${next} --overwrite`
   return next
+}
+
+function normalizeCreateNextApp(command: string): string {
+  const tokens = command
+    .replace(/\s--typescript\b/gi, ' --ts')
+    .replace(/\s--overwrite\b/gi, '')
+    .split(/\s+/)
+    .filter(Boolean)
+  const packageAt = tokens.findIndex((token) => /create-next-app/i.test(token))
+  let directoryAt = -1
+  for (let index = packageAt + 1; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? ''
+    if (token === '--') break
+    if (token.startsWith('-')) {
+      if (FLAG_WITH_VALUE.has(token.toLowerCase())) index += 1
+      continue
+    }
+    directoryAt = index
+    break
+  }
+  if (directoryAt === -1) tokens.splice(Math.max(packageAt, 0) + 1, 0, 'scaffold-next')
+  else tokens[directoryAt] = 'scaffold-next'
+  const text = tokens.join(' ')
+  const extras: string[] = []
+  if (!/--(?:ts|typescript|js|javascript)\b/i.test(text)) extras.push('--ts')
+  if (!/--(?:no-)?tailwind\b/i.test(text)) extras.push('--no-tailwind')
+  if (!/--(?:no-)?eslint\b/i.test(text)) extras.push('--eslint')
+  if (!/--(?:no-)?app\b/i.test(text)) extras.push('--app')
+  if (!/--(?:no-)?src-dir\b/i.test(text)) extras.push('--src-dir')
+  if (!/--use-(?:npm|pnpm|yarn|bun)\b/i.test(text)) extras.push('--use-npm')
+  if (!/--import-alias\b/i.test(text)) extras.push('--import-alias', '"@/*"')
+  return [...tokens, ...extras].join(' ')
 }
 
 export function removesLocalCoder(command: string): boolean {
@@ -137,6 +172,22 @@ export function dependenciesInstalled(toolTexts: string[]): boolean {
     if (projectInstallSucceeded(text)) ready = true
   }
   return !sawGenerator || ready
+}
+
+export function unfinishedPackageInstall(messages: Array<{ role: string; content: string }>): string | null {
+  const wanted: string[] = []
+  const done = new Set<string>()
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      const command = shellCommand(message.content)
+      if (command && isInstallCommand(command) && !isProjectInstall(command)) wanted.push(normalizeCommand(command))
+    }
+    if (message.role !== 'tool') continue
+    for (const command of wanted) {
+      if (commandAlreadySucceeded([message.content], command)) done.add(command)
+    }
+  }
+  return wanted.find((command) => !done.has(command)) ?? null
 }
 
 export function normalizeCommand(command: string): string {
@@ -205,10 +256,23 @@ const reactCreationQuestion = `Каким генератором создать 
 2) npx create-vite@latest . --template react --overwrite — Vite + JavaScript
 3) npx create-react-app . — Create React App, только JavaScript`
 
+function briefQuestion(visible: string): string | null {
+  const lines = visible.split('\n').map((line) => line.trim()).filter(Boolean)
+  const asked = lines.filter((line) => /\?/.test(line) || /^\d+[.)]\s+.*(?:npx|npm\s+create|pnpm\s+create|yarn\s+create|nuxi)/i.test(line))
+  if (!asked.length) return null
+  const picked = asked.join('\n')
+  if (picked.length <= 500) return picked
+  return `${picked.slice(0, 499)}…`
+}
+
 export function creationQuestion(userText: string, visible: string): string | null {
   const text = visible.trim()
-  if (shouldAskCreationChoice(text) || /npx\s+\S*create|npm\s+create|nuxi/i.test(text)) return text
-  if (!/уточн|какой|вариант|способ|генератор|стек/i.test(text)) return null
-  if (/react/i.test(`${userText}\n${text}`)) return reactCreationQuestion
-  return text || null
+  const mentionsChoice = shouldAskCreationChoice(text) || /npx\s+\S*create|npm\s+create|nuxi/i.test(text)
+  const asks = /уточн|какой|вариант|способ|генератор|стек/i.test(text)
+  if (!mentionsChoice && !asks) return null
+  const blob = `${userText}\n${text}`
+  if (/react/i.test(blob) && !/next\.js|create-next-app/i.test(blob)) return reactCreationQuestion
+  const lineCount = text.split('\n').filter((line) => line.trim()).length
+  if (lineCount <= 4 && text.length <= 400 && (mentionsChoice || /\?/.test(text))) return text
+  return briefQuestion(text) || null
 }

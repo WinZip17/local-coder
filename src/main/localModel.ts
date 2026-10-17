@@ -228,7 +228,7 @@ export async function completeLocal(options: {
       try {
         return await session.prompt(prompt, {
           temperature: options.settings.generation.temperature,
-          maxTokens: Math.min(options.settings.generation.maxTokens, Math.max(64, options.settings.local.contextSize - 256)),
+          maxTokens: Math.min(options.settings.generation.maxTokens, 1600, Math.max(64, options.settings.local.contextSize - 256)),
           signal: options.signal,
           onTextChunk: options.onToken
         })

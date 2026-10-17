@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { componentSnippet, describedLineEdit, describedSnippets, pathCommentFile, replacementContent, snippetToEdit } from './edits'
+import { clipToFirstCommand, componentSnippet, describedLineEdit, describedSnippets, hasUnclosedFence, pathCommentFile, replacementContent, shellCommand, snippetToEdit } from './edits'
 
 const buttonFile = `export function Filters() {
   return (
@@ -146,4 +146,63 @@ test('an unfenced path comment is the page file', () => {
 test('an unrelated fragment is not applied', () => {
   const snippet = `export function Missing() {\n  return <div>Другой экран</div>\n}`
   assert.equal(snippetToEdit(buttonFile, snippet), null)
+})
+
+test('an unfinished code block is not a file', () => {
+  const visible = [
+    'Создаю файл `src/types/news.ts`:',
+    '```typescript',
+    '// src/types/news.ts',
+    'export interface NewsItem {',
+    '  id: number',
+    '  title: string'
+  ].join('\n')
+  assert.equal(hasUnclosedFence(visible), true)
+  assert.equal(describedSnippets(visible).length, 0)
+})
+
+test('a shell block is a command, not a Next.js file', () => {
+  const visible = [
+    '### Шаг 1: Создание проекта с использованием Next.js',
+    '',
+    '```bash',
+    'npx create-next-app@latest . --typescript --overwrite',
+    '```'
+  ].join('\n')
+  assert.equal(describedSnippets(visible).length, 0)
+  assert.equal(shellCommand(visible), 'npx create-next-app@latest . --typescript --overwrite')
+  const readme = [
+    '```markdown',
+    '# Проект',
+    '',
+    '```bash',
+    'npm install',
+    '```',
+    '```'
+  ].join('\n')
+  assert.equal(shellCommand(readme), null)
+})
+
+test('a plan stops at the first shell command', () => {
+  const visible = [
+    '### План разработки',
+    '1. Создание проекта Next.js',
+    '2. Настройка стилей',
+    '',
+    '```bash',
+    'npx create-next-app@latest . --ts --no-tailwind --eslint --app --src-dir --use-npm --import-alias "@/*"',
+    '```',
+    '',
+    '```json',
+    '{ "name": "update_project_map", "arguments": { "summary": "создан" } }',
+    '```',
+    '',
+    '```bash',
+    'npm install @mui/material @emotion/react @emotion/styled',
+    '```'
+  ].join('\n')
+  const clipped = clipToFirstCommand(visible)
+  assert.equal(shellCommand(clipped), 'npx create-next-app@latest . --ts --no-tailwind --eslint --app --src-dir --use-npm --import-alias "@/*"')
+  assert.equal(clipped.includes('npm install @mui'), false)
+  assert.equal(clipped.includes('update_project_map'), false)
 })

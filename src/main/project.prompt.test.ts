@@ -25,6 +25,7 @@ test('system prompt stays inside the context budget and does not paste document 
   assert.match(prompt, /list_dir/)
   assert.match(prompt, /нет доступа к файловой системе/)
   assert.match(prompt, /официальным генератором/)
+  assert.match(prompt, /один этап/)
   assert.match(prompt, /Ненулевой код run_command/)
   assert.match(prompt, /Показано \d+ из 400/)
   assert.match(prompt, /docs\/guide-0\.md/)
