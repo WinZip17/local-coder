@@ -1,6 +1,8 @@
 {
   "name": "local-coder",
   "version": "0.1.0",
+  "license": "MIT",
+  "author": "WinZip",
   "private": true,
   "description": "Локальное десктопное приложение для разработки с ИИ",
   "main": "./out/main/index.js",
