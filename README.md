@@ -14,6 +14,11 @@ npm run dev
 ```bash
 npm run dist
 ```
+## Скриншоты
+![work.png](work.png)
+![work2.png](work2.png)
+![settings1.png](settings1.png)
+![settings2.png](settings2.png)
 
 ## Лицензия
 
